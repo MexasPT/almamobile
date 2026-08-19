@@ -50,20 +50,36 @@ class YetiForceApiService {
         .writeTimeout(8, TimeUnit.SECONDS)
         .build()
 
-    private fun getJdbcConnection(serverConfig: ServerConfig): Connection? {
-        return try {
-            val host = cleanHost(serverConfig.ip)
-            val port = serverConfig.port.trim().toIntOrNull() ?: 3306
-            val dbName = serverConfig.databaseName.trim()
-            val dbUser = serverConfig.dbUser.trim()
-            val dbPass = serverConfig.dbPassword
+    private fun getConnectionWithDiag(serverConfig: ServerConfig): Pair<Connection?, String> {
+        val host = cleanHost(serverConfig.ip)
+        val port = serverConfig.port.trim().toIntOrNull() ?: 3306
+        val dbName = serverConfig.databaseName.trim()
+        val dbUser = serverConfig.dbUser.trim()
+        val dbPass = serverConfig.dbPassword
 
-            val jdbcUrl = "jdbc:mariadb://$host:$port/$dbName?connectTimeout=6000&socketTimeout=6000&autoReconnect=true"
-            DriverManager.getConnection(jdbcUrl, dbUser, dbPass)
-        } catch (e: Exception) {
-            Log.e(TAG, "JDBC Connection failed: ${e.message}")
-            null
+        val urls = listOf(
+            "jdbc:mariadb://$host:$port/$dbName?connectTimeout=7000&socketTimeout=7000&allowPublicKeyRetrieval=true&sslMode=trust&disableSsl=true&useSSL=false&characterEncoding=UTF-8&autoReconnect=true",
+            "jdbc:mariadb://$host:$port/$dbName?connectTimeout=7000&socketTimeout=7000&disableSsl=true&autoReconnect=true",
+            "jdbc:mariadb://$host:$port/$dbName?connectTimeout=7000&socketTimeout=7000"
+        )
+
+        var lastError = ""
+        for (url in urls) {
+            try {
+                val conn = DriverManager.getConnection(url, dbUser, dbPass)
+                if (conn != null && !conn.isClosed) {
+                    return Pair(conn, "OK")
+                }
+            } catch (e: Exception) {
+                lastError = e.message ?: e.toString()
+                Log.w(TAG, "Attempt with URL $url failed: $lastError")
+            }
         }
+        return Pair(null, lastError)
+    }
+
+    private fun getJdbcConnection(serverConfig: ServerConfig): Connection? {
+        return getConnectionWithDiag(serverConfig).first
     }
 
     private fun cleanHost(raw: String): String {
@@ -95,12 +111,12 @@ class YetiForceApiService {
             }
             val elapsed = System.currentTimeMillis() - startTime
 
-            // 2. Try Direct JDBC database connection if DB User is set
+            // 2. Direct JDBC database connection test
             var dbDetail = ""
             if (serverConfig.dbUser.isNotBlank() && (portInt == 3306 || portInt == 3307 || portInt == 3308)) {
-                try {
-                    val conn = getJdbcConnection(serverConfig)
-                    if (conn != null) {
+                val (conn, diag) = getConnectionWithDiag(serverConfig)
+                if (conn != null) {
+                    try {
                         val stmt = conn.createStatement()
                         val rs = stmt.executeQuery("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '${serverConfig.databaseName.trim()}'")
                         var tableCount = 0
@@ -111,11 +127,11 @@ class YetiForceApiService {
                         stmt.close()
                         conn.close()
                         dbDetail = " • Ligação BD OK ($tableCount tabelas encontradas)"
-                    } else {
-                        dbDetail = " • Porta 3306 aberta (Autenticação BD a verificar)"
+                    } catch (e: Exception) {
+                        dbDetail = " • Ligação BD efetuada (${e.message})"
                     }
-                } catch (dbEx: Exception) {
-                    dbDetail = " • Porta 3306 aberta (BD: ${dbEx.message})"
+                } else {
+                    dbDetail = " • Porta 3306 acessível (Aviso BD: $diag)"
                 }
             } else {
                 // Try HTTP probe
@@ -153,80 +169,73 @@ class YetiForceApiService {
         }
 
         val cleanUser = username.trim()
+        val userTable = tableConfig.userTable.ifBlank { "vtiger_users" }.trim()
 
         // 1. Direct Database Query with Hashed Password Verification (BCrypt, MD5, SHA, etc.)
-        try {
-            val conn = getJdbcConnection(serverConfig)
-            if (conn != null) {
-                val userTable = tableConfig.userTable.ifBlank { "vtiger_users" }.trim()
-                val sql = "SELECT * FROM `$userTable` WHERE `user_name` = ? OR `email1` = ? OR `email` = ? LIMIT 1"
-                
-                try {
-                    val stmt = conn.prepareStatement(sql)
-                    stmt.setString(1, cleanUser)
-                    stmt.setString(2, cleanUser)
-                    stmt.setString(3, cleanUser)
-                    val rs = stmt.executeQuery()
+        val (conn, dbDiag) = getConnectionWithDiag(serverConfig)
+        if (conn != null) {
+            try {
+                val sql = "SELECT * FROM `$userTable` WHERE LOWER(`user_name`) = LOWER(?) OR LOWER(`email1`) = LOWER(?) OR LOWER(`email`) = LOWER(?) LIMIT 1"
+                val stmt = conn.prepareStatement(sql)
+                stmt.setString(1, cleanUser)
+                stmt.setString(2, cleanUser)
+                stmt.setString(3, cleanUser)
+                val rs = stmt.executeQuery()
 
-                    if (rs.next()) {
-                        val userId = getColumnString(rs, "id", "id").ifBlank { getColumnString(rs, "user_id", "1") }
-                        val dbUserName = getColumnString(rs, "user_name", cleanUser)
-                        val storedPassword = getColumnString(rs, "user_password", "")
-                        val storedHash = getColumnString(rs, "user_hash", "")
-                        val firstName = getColumnString(rs, "first_name", "")
-                        val lastName = getColumnString(rs, "last_name", "")
-                        val email = getColumnString(rs, "email1", "").ifBlank { getColumnString(rs, "email", "") }
-                        val status = getColumnString(rs, "status", "Active")
-                        val roleId = getColumnString(rs, "roleid", "").ifBlank { getColumnString(rs, "role_name", "Comercial") }
-                        val phoneMobile = getColumnString(rs, "phone_mobile", "")
-                        val department = getColumnString(rs, "department", "")
+                if (rs.next()) {
+                    val userId = getColumnString(rs, "id", "id").ifBlank { getColumnString(rs, "user_id", "1") }
+                    val dbUserName = getColumnString(rs, "user_name", cleanUser)
+                    val storedPassword = getColumnString(rs, "user_password", "")
+                    val storedHash = getColumnString(rs, "user_hash", "")
+                    val firstName = getColumnString(rs, "first_name", "")
+                    val lastName = getColumnString(rs, "last_name", "")
+                    val email = getColumnString(rs, "email1", "").ifBlank { getColumnString(rs, "email", "") }
+                    val status = getColumnString(rs, "status", "Active")
+                    val roleId = getColumnString(rs, "roleid", "").ifBlank { getColumnString(rs, "role_name", "Comercial") }
+                    val phoneMobile = getColumnString(rs, "phone_mobile", "")
+                    val department = getColumnString(rs, "department", "")
 
-                        rs.close()
-                        stmt.close()
-                        conn.close()
+                    rs.close()
+                    stmt.close()
+                    conn.close()
 
-                        // Verify Password against Hashed Password or Hash Column
-                        val isPassValid = PasswordVerifier.verify(password, storedPassword, dbUserName) ||
-                                          (storedHash.isNotBlank() && PasswordVerifier.verify(password, storedHash, dbUserName)) ||
-                                          (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword)
+                    Log.d(TAG, "Found user '$dbUserName' in '$userTable'. Verifying password against stored hash...")
 
-                        if (isPassValid) {
-                            val displayName = when {
-                                firstName.isNotBlank() && lastName.isNotBlank() -> "$firstName $lastName"
-                                firstName.isNotBlank() -> firstName
-                                lastName.isNotBlank() -> lastName
-                                else -> dbUserName
-                            }
+                    // Verify Password against Hashed Password in user_password or user_hash
+                    val isPassValid = PasswordVerifier.verify(password, storedPassword, dbUserName) ||
+                                      (storedHash.isNotBlank() && PasswordVerifier.verify(password, storedHash, dbUserName)) ||
+                                      (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword)
 
-                            val authenticatedUser = User(
-                                id = userId,
-                                userName = dbUserName,
-                                firstName = firstName.ifBlank { displayName },
-                                lastName = lastName,
-                                email = email,
-                                roleName = roleId,
-                                status = status,
-                                phoneMobile = phoneMobile,
-                                department = department
-                            )
-                            Log.i(TAG, "User '$cleanUser' authenticated successfully via database hash verification.")
-                            return@withContext AuthResult.Success(authenticatedUser, "Autenticação efetuada com sucesso.")
-                        } else {
-                            Log.w(TAG, "Password mismatch for user '$cleanUser'.")
-                            return@withContext AuthResult.Error("Palavra-passe incorreta para o utilizador '$cleanUser'.")
-                        }
+                    if (isPassValid) {
+                        val authenticatedUser = User(
+                            id = userId,
+                            userName = dbUserName,
+                            firstName = firstName,
+                            lastName = lastName,
+                            email = email,
+                            roleName = roleId,
+                            status = status,
+                            phoneMobile = phoneMobile,
+                            department = department
+                        )
+                        Log.i(TAG, "User '$cleanUser' authenticated successfully. FullName: '${authenticatedUser.fullName}'")
+                        return@withContext AuthResult.Success(authenticatedUser, "Autenticação efetuada com sucesso.")
                     } else {
-                        rs.close()
-                        stmt.close()
+                        Log.w(TAG, "Password mismatch for user '$cleanUser'.")
+                        return@withContext AuthResult.Error("Palavra-passe incorreta para o utilizador '$cleanUser' (tabela '$userTable').")
                     }
-                } catch (sqlEx: Exception) {
-                    Log.w(TAG, "SQL Query error on user table: ${sqlEx.message}")
-                } finally {
-                    try { conn.close() } catch (_: Exception) {}
+                } else {
+                    rs.close()
+                    stmt.close()
+                    conn.close()
+                    Log.w(TAG, "User '$cleanUser' not found in table '$userTable'.")
+                    return@withContext AuthResult.Error("O utilizador '$cleanUser' não foi encontrado na tabela '$userTable' (campo 'user_name').")
                 }
+            } catch (sqlEx: Exception) {
+                Log.w(TAG, "SQL Query error on user table: ${sqlEx.message}")
+                try { conn.close() } catch (_: Exception) {}
+                return@withContext AuthResult.Error("Erro ao consultar a tabela '$userTable': ${sqlEx.message}")
             }
-        } catch (dbEx: Exception) {
-            Log.w(TAG, "DB Auth attempt error: ${dbEx.message}")
         }
 
         // 2. YetiForce CRM WebService API Fallback
@@ -266,7 +275,7 @@ class YetiForceApiService {
                             val user = User(
                                 id = resultObj.optString("id", "usr_${cleanUser.hashCode().toString().takeLast(6)}"),
                                 userName = cleanUser,
-                                firstName = resultObj.optString("first_name", cleanUser),
+                                firstName = resultObj.optString("first_name", ""),
                                 lastName = resultObj.optString("last_name", ""),
                                 email = resultObj.optString("email1", resultObj.optString("email", "")),
                                 roleName = resultObj.optString("role_name", resultObj.optString("role", "Comercial YetiForce")),
@@ -283,13 +292,13 @@ class YetiForceApiService {
             Log.w(TAG, "Remote WebService auth error: ${e.message}")
         }
 
-        // 3. Direct verification against database user credentials
+        // 3. Direct verification against database user credentials if configured
         if (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword && serverConfig.dbPassword.isNotBlank()) {
             val user = User(
                 id = "usr_${cleanUser.hashCode().toString().takeLast(6)}",
                 userName = cleanUser,
-                firstName = cleanUser,
-                lastName = "",
+                firstName = "",
+                lastName = cleanUser,
                 email = "",
                 roleName = "Administrador Base de Dados",
                 status = "Ativo (${tableConfig.userTable})",
@@ -298,8 +307,9 @@ class YetiForceApiService {
             return@withContext AuthResult.Success(user, "Autenticado como administrador da base de dados ${serverConfig.databaseName}.")
         }
 
-        // If credentials could not be verified
-        AuthResult.Error("Credenciais inválidas: utilizador '$cleanUser' ou palavra-passe incorretos na tabela '${tableConfig.userTable}' do servidor YetiForce.")
+        // 4. Return clear error message with database diagnostic
+        val diagDetail = if (dbDiag.isNotBlank() && dbDiag != "OK") " (Diagnóstico BD: $dbDiag)" else ""
+        AuthResult.Error("Falha na autenticação para '$cleanUser'.$diagDetail Verifique o utilizador, palavra-passe e se o servidor MySQL está acessível na porta ${serverConfig.port}.")
     }
 
     suspend fun fetchClients(

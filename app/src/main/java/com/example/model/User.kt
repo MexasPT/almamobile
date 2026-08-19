@@ -18,7 +18,15 @@ data class User(
 ) {
     val fullName: String
         get() {
-            val name = "$firstName $lastName".trim()
-            return if (name.isNotBlank()) name else userName
+            val name = if (lastName.isNotBlank() && firstName.isNotBlank()) {
+                "$lastName $firstName".trim()
+            } else if (lastName.isNotBlank()) {
+                lastName
+            } else if (firstName.isNotBlank()) {
+                firstName
+            } else {
+                userName
+            }
+            return name
         }
 }
