@@ -26,14 +26,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Business
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,22 +44,18 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -72,22 +66,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.data.remote.EmailDispatcher
 import com.example.data.remote.EmailMessage
+import com.example.data.remote.SmtpResult
 import com.example.model.Client
 import com.example.model.Opportunity
 import com.example.ui.MainViewModel
 import com.example.ui.components.MapLocationCard
-import com.example.ui.theme.AlmaBlue
 import com.example.ui.theme.SuccessGreen
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -98,7 +89,6 @@ import java.util.Locale
 fun OpportunityScreen(
     viewModel: MainViewModel
 ) {
-    val context = LocalContext.current
     val currentLocation by viewModel.currentLocation.collectAsStateWithLifecycle()
     val isGpsRefreshing by viewModel.isGpsRefreshing.collectAsStateWithLifecycle()
     val allClients by viewModel.allClients.collectAsStateWithLifecycle()
@@ -108,7 +98,6 @@ fun OpportunityScreen(
     var selectedTabIndex by remember { mutableIntStateOf(0) }
 
     // Form States
-    // Tipo de Oportunidade - select com as options Cliente e Lead
     var opportunityType by remember { mutableStateOf("Cliente") } // "Cliente" or "Lead"
     var selectedClient by remember { mutableStateOf<Client?>(null) }
     var clientSearchQuery by remember { mutableStateOf("") }
@@ -116,7 +105,6 @@ fun OpportunityScreen(
 
     var leadCompany by remember { mutableStateOf("") }
 
-    // Assunto - select com as options (AlmaForce, Faturação, Outros)
     var subject by remember { mutableStateOf("AlmaForce") }
     var customSubject by remember { mutableStateOf("") }
     var observations by remember { mutableStateOf("") }
@@ -124,8 +112,8 @@ fun OpportunityScreen(
     var subjectMenuExpanded by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
 
-    // Email Dispatch Result Dialog
-    var sentEmailMessage by remember { mutableStateOf<EmailMessage?>(null) }
+    // In-App Opportunity Save + SMTP Result Dialog
+    var saveResultDialog by remember { mutableStateOf<Triple<Opportunity, EmailMessage, SmtpResult>?>(null) }
 
     val subjectOptions = listOf("AlmaForce", "Faturação", "Outros")
 
@@ -184,7 +172,7 @@ fun OpportunityScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = "Nenhum cliente encontrado",
+                                        text = if (allClients.isEmpty()) "Nenhum cliente sincronizado do CRM YetiForce. Aceda às Configurações para validar a tabela de clientes." else "Nenhum cliente encontrado com esse nome.",
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -245,70 +233,88 @@ fun OpportunityScreen(
         )
     }
 
-    // Email Dispatch Success Modal
-    sentEmailMessage?.let { emailMsg ->
+    // In-App Opportunity Save Feedback Dialog
+    saveResultDialog?.let { (opp, emailMsg, smtpRes) ->
+        val isSmtpSuccess = smtpRes is SmtpResult.Success
+
         AlertDialog(
-            onDismissRequest = { sentEmailMessage = null },
+            onDismissRequest = { saveResultDialog = null },
             icon = {
                 Icon(
-                    imageVector = Icons.Default.CheckCircle,
+                    imageVector = if (isSmtpSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
                     contentDescription = null,
-                    tint = SuccessGreen,
-                    modifier = Modifier.size(36.dp)
+                    tint = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(40.dp)
                 )
             },
             title = {
                 Text(
                     text = "Oportunidade Gravada!",
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = SuccessGreen
                 )
             },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "A notificação com a localização GPS, Nome da Rua, Assunto e Observações foi preparada para o seu Email Pessoal:",
+                        text = "A oportunidade comercial foi guardada na base de dados, associada às coordenadas GPS da morada e enviada via SMTP para o seu email.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = "Para: ${emailMsg.recipient}",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(text = "• Tipo: ${opp.type} (${opp.displayEntityName})", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text(text = "• Assunto: ${opp.finalSubject}", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                            Text(text = "• Morada GPS: ${opp.streetAddress}", fontSize = 12.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // SMTP status banner
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isSmtpSuccess) SuccessGreen.copy(alpha = 0.15f) else MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Mail,
+                                contentDescription = null,
+                                tint = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = emailMsg.subject,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = if (isSmtpSuccess) "Notificação SMTP enviada para:" else "Aviso de Envio SMTP:",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    color = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    text = if (isSmtpSuccess) opp.userEmail.ifBlank { emailMsg.recipient } else (smtpRes as SmtpResult.Error).details,
+                                    fontSize = 11.sp,
+                                    color = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
                         }
                     }
                 }
             },
             confirmButton = {
                 Button(
-                    onClick = {
-                        EmailDispatcher.dispatchEmailIntent(context, emailMsg)
-                        sentEmailMessage = null
-                    },
-                    modifier = Modifier.testTag("btn_send_email_now")
+                    onClick = { saveResultDialog = null },
+                    modifier = Modifier.testTag("btn_close_opp_dialog")
                 ) {
-                    Icon(imageVector = Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Abrir Cliente de Email")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { sentEmailMessage = null }) {
-                    Text("Concluir")
+                    Text("OK, Concluir")
                 }
             }
         )
@@ -320,20 +326,20 @@ fun OpportunityScreen(
             .imePadding()
     ) {
         // Tab Selector
-        TabRow(
+        SecondaryTabRow(
             selectedTabIndex = selectedTabIndex,
             containerColor = MaterialTheme.colorScheme.surface
         ) {
             Tab(
                 selected = selectedTabIndex == 0,
                 onClick = { selectedTabIndex = 0 },
-                text = { Text("Nova Oportunidade") },
+                text = { Text("Nova Oportunidade", fontWeight = FontWeight.Bold) },
                 icon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp)) }
             )
             Tab(
                 selected = selectedTabIndex == 1,
                 onClick = { selectedTabIndex = 1 },
-                text = { Text("Histórico (${allOpportunities.size})") },
+                text = { Text("Histórico Geral (${allOpportunities.size})", fontWeight = FontWeight.Bold) },
                 icon = { Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(18.dp)) }
             )
         }
@@ -346,7 +352,7 @@ fun OpportunityScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // 1. Interactive Map with device location (As requested: "Abre um mapa com a localização do dispositivo...")
+                // 1. Interactive Map with device location
                 MapLocationCard(
                     location = currentLocation,
                     isRefreshing = isGpsRefreshing,
@@ -421,7 +427,6 @@ fun OpportunityScreen(
 
                         // Conditional Fields
                         if (opportunityType == "Cliente") {
-                            // Se Tipo de Oportunidade = Cliente: Abre uma select com os clientes como options (pesquisável por nome)
                             Text(
                                 text = "Selecionar Cliente *",
                                 style = MaterialTheme.typography.labelMedium,
@@ -475,7 +480,6 @@ fun OpportunityScreen(
                                 }
                             }
                         } else {
-                            // Se Tipo de Oportunidade = Lead: Empresa "Lead" (input text)
                             OutlinedTextField(
                                 value = leadCompany,
                                 onValueChange = { leadCompany = it },
@@ -535,7 +539,6 @@ fun OpportunityScreen(
                             }
                         }
 
-                        // Se Assunto = Outros Abre um input text (obrigatório) com o Label Outro Assunto
                         if (subject == "Outros") {
                             Spacer(modifier = Modifier.height(12.dp))
                             OutlinedTextField(
@@ -549,19 +552,11 @@ fun OpportunityScreen(
                                     .fillMaxWidth()
                                     .testTag("input_custom_subject")
                             )
-                            if (customSubject.isBlank()) {
-                                Text(
-                                    text = "O campo Outro Assunto é obrigatório quando selecionado 'Outros'.",
-                                    color = MaterialTheme.colorScheme.error,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.padding(start = 4.dp, top = 2.dp)
-                                )
-                            }
                         }
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // Observações - Text area para observações
+                        // Observações
                         OutlinedTextField(
                             value = observations,
                             onValueChange = { observations = it },
@@ -593,9 +588,9 @@ fun OpportunityScreen(
                                     subject = subject,
                                     customSubject = customSubject,
                                     notes = observations,
-                                    onComplete = { emailMsg ->
+                                    onComplete = { opp, emailMsg, smtpRes ->
                                         isSaving = false
-                                        sentEmailMessage = emailMsg
+                                        saveResultDialog = Triple(opp, emailMsg, smtpRes)
                                         // Reset form
                                         leadCompany = ""
                                         selectedClient = null
@@ -619,11 +614,11 @@ fun OpportunityScreen(
                                     color = Color.White
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("A gravar e enviar email...")
+                                Text("A gravar e enviar por SMTP...")
                             } else {
                                 Icon(imageVector = Icons.Default.Save, contentDescription = null)
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Guardar e Notificar por Email", fontWeight = FontWeight.Bold)
+                                Text("Guardar e Enviar por SMTP", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -727,40 +722,22 @@ fun OpportunityScreen(
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                        Icon(
-                                            imageVector = Icons.Default.LocationOn,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = opp.streetAddress,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-
-                                    IconButton(
-                                        onClick = {
-                                            val msg = EmailDispatcher.generateOpportunityEmailContent(opp)
-                                            EmailDispatcher.dispatchEmailIntent(context, msg)
-                                        },
-                                        modifier = Modifier.size(32.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Email,
-                                            contentDescription = "Reenviar Email",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.LocationOn,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = opp.streetAddress,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
                             }
                         }

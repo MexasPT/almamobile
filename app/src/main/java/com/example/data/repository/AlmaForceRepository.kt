@@ -6,6 +6,8 @@ import com.example.data.remote.AuthResult
 import com.example.data.remote.ConnectionTestResult
 import com.example.data.remote.EmailDispatcher
 import com.example.data.remote.EmailMessage
+import com.example.data.remote.SmtpClient
+import com.example.data.remote.SmtpResult
 import com.example.data.remote.YetiForceApiService
 import com.example.location.LocationHelper
 import com.example.model.Attendance
@@ -13,6 +15,7 @@ import com.example.model.Client
 import com.example.model.GpsLocation
 import com.example.model.Opportunity
 import com.example.model.ServerConfig
+import com.example.model.SmtpConfig
 import com.example.model.TableConfig
 import com.example.model.User
 import kotlinx.coroutines.Dispatchers
@@ -25,10 +28,12 @@ class AlmaForceRepository(
     private val database: AppDatabase,
     private val preferencesManager: PreferencesManager,
     private val apiService: YetiForceApiService,
+    private val smtpClient: SmtpClient,
     val locationHelper: LocationHelper
 ) {
     val serverConfig: StateFlow<ServerConfig> = preferencesManager.serverConfigFlow
     val tableConfig: StateFlow<TableConfig> = preferencesManager.tableConfigFlow
+    val smtpConfig: StateFlow<SmtpConfig> = preferencesManager.smtpConfigFlow
     val isLoggedIn: StateFlow<Boolean> = preferencesManager.isLoggedInFlow
     val currentUser: Flow<User?> = database.userDao().getCachedUser()
 
@@ -63,12 +68,20 @@ class AlmaForceRepository(
         return apiService.testConnection(config)
     }
 
+    suspend fun testSmtp(config: SmtpConfig, testRecipient: String): SmtpResult {
+        return smtpClient.testSmtpConnection(config, testRecipient)
+    }
+
     fun saveServerConfig(config: ServerConfig) {
         preferencesManager.saveServerConfig(config)
     }
 
     fun saveTableConfig(config: TableConfig) {
         preferencesManager.saveTableConfig(config)
+    }
+
+    fun saveSmtpConfig(config: SmtpConfig) {
+        preferencesManager.saveSmtpConfig(config)
     }
 
     suspend fun login(username: String, password: String): AuthResult = withContext(Dispatchers.IO) {
@@ -83,7 +96,7 @@ class AlmaForceRepository(
                 userEmail = result.user.email,
                 fullName = result.user.fullName
             )
-            // Seed clients if empty
+            // Sync real clients from YetiForce CRM
             syncClients()
         }
         result
@@ -95,10 +108,12 @@ class AlmaForceRepository(
 
     suspend fun syncClients() = withContext(Dispatchers.IO) {
         val clients = apiService.fetchClients(serverConfig.value, tableConfig.value)
-        database.clientDao().insertClients(clients)
+        if (clients.isNotEmpty()) {
+            database.clientDao().insertClients(clients)
+        }
     }
 
-    suspend fun saveOpportunity(opportunity: Opportunity): Pair<Long, EmailMessage> = withContext(Dispatchers.IO) {
+    suspend fun saveOpportunity(opportunity: Opportunity): Triple<Long, EmailMessage, SmtpResult> = withContext(Dispatchers.IO) {
         val id = database.opportunityDao().insertOpportunity(opportunity)
         val savedOpp = opportunity.copy(id = id)
 
@@ -107,7 +122,20 @@ class AlmaForceRepository(
 
         // Build Email Notification for Personal Email
         val emailMessage = EmailDispatcher.generateOpportunityEmailContent(savedOpp)
-        Pair(id, emailMessage)
+
+        // Send directly via SMTP in background
+        val smtpResult = if (opportunity.userEmail.isNotBlank()) {
+            smtpClient.sendEmail(
+                config = smtpConfig.value,
+                recipient = opportunity.userEmail,
+                subject = emailMessage.subject,
+                body = emailMessage.body
+            )
+        } else {
+            SmtpResult.Error("Email pessoal do utilizador em branco", "Defina o email nas configurações ou perfil.")
+        }
+
+        Triple(id, emailMessage, smtpResult)
     }
 
     suspend fun registerAttendance(
@@ -115,7 +143,7 @@ class AlmaForceRepository(
         collaboratorName: String,
         collaboratorId: String,
         entryTimestamp: Long? = null
-    ): Pair<Attendance, EmailMessage> = withContext(Dispatchers.IO) {
+    ): Triple<Attendance, EmailMessage, SmtpResult> = withContext(Dispatchers.IO) {
         val gps = locationHelper.refreshLocation()
         val companyEmail = tableConfig.value.companyNotificationEmail
 
@@ -141,7 +169,20 @@ class AlmaForceRepository(
 
         // Build Email Notification for Company Email
         val emailMessage = EmailDispatcher.generateAttendanceEmailContent(savedAttendance)
-        Pair(savedAttendance, emailMessage)
+
+        // Send directly via SMTP in background
+        val smtpResult = if (companyEmail.isNotBlank()) {
+            smtpClient.sendEmail(
+                config = smtpConfig.value,
+                recipient = companyEmail,
+                subject = emailMessage.subject,
+                body = emailMessage.body
+            )
+        } else {
+            SmtpResult.Error("Email da empresa em branco", "Defina o email da empresa nas configurações.")
+        }
+
+        Triple(savedAttendance, emailMessage, smtpResult)
     }
 
     suspend fun refreshGps(): GpsLocation {

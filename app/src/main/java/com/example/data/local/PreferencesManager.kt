@@ -3,6 +3,7 @@ package com.example.data.local
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.model.ServerConfig
+import com.example.model.SmtpConfig
 import com.example.model.TableConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +18,9 @@ class PreferencesManager(context: Context) {
 
     private val _tableConfigFlow = MutableStateFlow(loadTableConfig())
     val tableConfigFlow: StateFlow<TableConfig> = _tableConfigFlow.asStateFlow()
+
+    private val _smtpConfigFlow = MutableStateFlow(loadSmtpConfig())
+    val smtpConfigFlow: StateFlow<SmtpConfig> = _smtpConfigFlow.asStateFlow()
 
     private val _isLoggedInFlow = MutableStateFlow(isUserLoggedIn())
     val isLoggedInFlow: StateFlow<Boolean> = _isLoggedInFlow.asStateFlow()
@@ -69,6 +73,33 @@ class PreferencesManager(context: Context) {
         _tableConfigFlow.value = config
     }
 
+    fun loadSmtpConfig(): SmtpConfig {
+        return SmtpConfig(
+            senderName = prefs.getString(KEY_SMTP_SENDER_NAME, "AlmaForce CRM") ?: "AlmaForce CRM",
+            senderEmail = prefs.getString(KEY_SMTP_SENDER_EMAIL, "notificacoes@almaforce.pt") ?: "notificacoes@almaforce.pt",
+            host = prefs.getString(KEY_SMTP_HOST, "smtp.almaforce.pt") ?: "smtp.almaforce.pt",
+            port = prefs.getString(KEY_SMTP_PORT, "587") ?: "587",
+            requireAuth = prefs.getBoolean(KEY_SMTP_REQ_AUTH, true),
+            securityType = prefs.getString(KEY_SMTP_SECURITY, "TLS") ?: "TLS",
+            username = prefs.getString(KEY_SMTP_USER, "") ?: "",
+            password = prefs.getString(KEY_SMTP_PASS, "") ?: ""
+        )
+    }
+
+    fun saveSmtpConfig(config: SmtpConfig) {
+        prefs.edit()
+            .putString(KEY_SMTP_SENDER_NAME, config.senderName)
+            .putString(KEY_SMTP_SENDER_EMAIL, config.senderEmail)
+            .putString(KEY_SMTP_HOST, config.host)
+            .putString(KEY_SMTP_PORT, config.port)
+            .putBoolean(KEY_SMTP_REQ_AUTH, config.requireAuth)
+            .putString(KEY_SMTP_SECURITY, config.securityType)
+            .putString(KEY_SMTP_USER, config.username)
+            .putString(KEY_SMTP_PASS, config.password)
+            .apply()
+        _smtpConfigFlow.value = config
+    }
+
     fun setLoggedIn(isLoggedIn: Boolean, username: String = "", userEmail: String = "", fullName: String = "") {
         prefs.edit()
             .putBoolean(KEY_IS_LOGGED_IN, isLoggedIn)
@@ -80,9 +111,9 @@ class PreferencesManager(context: Context) {
     }
 
     fun isUserLoggedIn(): Boolean = prefs.getBoolean(KEY_IS_LOGGED_IN, false)
-    fun getSavedUsername(): String = prefs.getString(KEY_SAVED_USERNAME, "admin") ?: "admin"
-    fun getSavedUserEmail(): String = prefs.getString(KEY_SAVED_USER_EMAIL, "comercial@almaforce.pt") ?: "comercial@almaforce.pt"
-    fun getSavedFullName(): String = prefs.getString(KEY_SAVED_FULL_NAME, "Gestor Comercial") ?: "Gestor Comercial"
+    fun getSavedUsername(): String = prefs.getString(KEY_SAVED_USERNAME, "") ?: ""
+    fun getSavedUserEmail(): String = prefs.getString(KEY_SAVED_USER_EMAIL, "") ?: ""
+    fun getSavedFullName(): String = prefs.getString(KEY_SAVED_FULL_NAME, "") ?: ""
 
     companion object {
         private const val KEY_IP = "pref_ip"
@@ -100,9 +131,19 @@ class PreferencesManager(context: Context) {
         private const val KEY_FLD_CLIENT_NAME = "pref_fld_client_name"
         private const val KEY_COMPANY_EMAIL = "pref_company_email"
 
+        private const val KEY_SMTP_SENDER_NAME = "pref_smtp_sender_name"
+        private const val KEY_SMTP_SENDER_EMAIL = "pref_smtp_sender_email"
+        private const val KEY_SMTP_HOST = "pref_smtp_host"
+        private const val KEY_SMTP_PORT = "pref_smtp_port"
+        private const val KEY_SMTP_REQ_AUTH = "pref_smtp_req_auth"
+        private const val KEY_SMTP_SECURITY = "pref_smtp_security"
+        private const val KEY_SMTP_USER = "pref_smtp_user"
+        private const val KEY_SMTP_PASS = "pref_smtp_pass"
+
         private const val KEY_IS_LOGGED_IN = "pref_is_logged_in"
         private const val KEY_SAVED_USERNAME = "pref_saved_username"
         private const val KEY_SAVED_USER_EMAIL = "pref_saved_user_email"
         private const val KEY_SAVED_FULL_NAME = "pref_saved_full_name"
     }
 }
+

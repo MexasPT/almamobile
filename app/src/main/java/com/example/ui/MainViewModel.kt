@@ -9,6 +9,8 @@ import com.example.data.remote.AuthResult
 import com.example.data.remote.ConnectionTestResult
 import com.example.data.remote.EmailDispatcher
 import com.example.data.remote.EmailMessage
+import com.example.data.remote.SmtpClient
+import com.example.data.remote.SmtpResult
 import com.example.data.remote.YetiForceApiService
 import com.example.data.repository.AlmaForceRepository
 import com.example.location.LocationHelper
@@ -17,6 +19,7 @@ import com.example.model.Client
 import com.example.model.GpsLocation
 import com.example.model.Opportunity
 import com.example.model.ServerConfig
+import com.example.model.SmtpConfig
 import com.example.model.TableConfig
 import com.example.model.User
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,11 +31,10 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.util.Calendar
 
 sealed class UiNotification {
-    data class Success(val message: String, val emailMessage: EmailMessage? = null) : UiNotification()
-    data class Error(val message: String) : UiNotification()
+    data class Success(val message: String, val details: String = "", val emailMessage: EmailMessage? = null) : UiNotification()
+    data class Error(val message: String, val details: String = "") : UiNotification()
     data class Info(val message: String) : UiNotification()
 }
 
@@ -41,33 +43,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val database = AppDatabase.getDatabase(application)
     private val preferencesManager = PreferencesManager(application)
     private val apiService = YetiForceApiService()
+    private val smtpClient = SmtpClient()
     val locationHelper = LocationHelper(application)
 
     val repository = AlmaForceRepository(
         database = database,
         preferencesManager = preferencesManager,
         apiService = apiService,
+        smtpClient = smtpClient,
         locationHelper = locationHelper
     )
 
     val serverConfig: StateFlow<ServerConfig> = repository.serverConfig
     val tableConfig: StateFlow<TableConfig> = repository.tableConfig
+    val smtpConfig: StateFlow<SmtpConfig> = repository.smtpConfig
     val isLoggedIn: StateFlow<Boolean> = repository.isLoggedIn
 
     val currentUser: StateFlow<User?> = repository.currentUser
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
-            initialValue = User(
-                id = "usr_101",
-                userName = preferencesManager.getSavedUsername(),
-                firstName = preferencesManager.getSavedFullName(),
-                lastName = "",
-                email = preferencesManager.getSavedUserEmail(),
-                roleName = "Consultor Comercial YetiForce",
-                status = "Ativo (vtiger_users)",
-                department = "Vendas & Suporte AlmaForce"
-            )
+            initialValue = if (preferencesManager.isUserLoggedIn() && preferencesManager.getSavedUsername().isNotBlank()) {
+                User(
+                    id = "usr_${preferencesManager.getSavedUsername().hashCode().toString().takeLast(6)}",
+                    userName = preferencesManager.getSavedUsername(),
+                    firstName = preferencesManager.getSavedFullName().ifBlank { preferencesManager.getSavedUsername() },
+                    lastName = "",
+                    email = preferencesManager.getSavedUserEmail(),
+                    roleName = "Consultor Comercial YetiForce",
+                    status = "Ativo",
+                    department = "Comercial"
+                )
+            } else null
         )
 
     val currentLocation: StateFlow<GpsLocation> = repository.currentLocation
@@ -111,9 +118,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val notifications: SharedFlow<UiNotification> = _notifications.asSharedFlow()
 
     init {
-        // Initial setup and seed check
         viewModelScope.launch {
-            repository.syncClients()
+            if (preferencesManager.isUserLoggedIn()) {
+                repository.syncClients()
+            }
             repository.refreshGps()
         }
     }
@@ -162,8 +170,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun saveSmtpConfig(config: SmtpConfig) {
+        repository.saveSmtpConfig(config)
+        viewModelScope.launch {
+            _notifications.emit(UiNotification.Success("Configurações SMTP guardadas com sucesso!"))
+        }
+    }
+
     suspend fun testConnection(config: ServerConfig): ConnectionTestResult {
         return repository.testServerConnection(config)
+    }
+
+    suspend fun testSmtp(config: SmtpConfig, testRecipient: String): SmtpResult {
+        return repository.testSmtp(config, testRecipient)
     }
 
     fun refreshGps() {
@@ -180,13 +199,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         subject: String,
         customSubject: String?,
         notes: String,
-        onComplete: (EmailMessage) -> Unit
+        onComplete: (Opportunity, EmailMessage, SmtpResult) -> Unit
     ) {
         viewModelScope.launch {
             val gps = repository.refreshGps()
             val user = currentUser.value
-            val personalEmail = user?.email ?: preferencesManager.getSavedUserEmail()
-            val userName = user?.fullName ?: preferencesManager.getSavedFullName()
+            val personalEmail = user?.email?.ifBlank { preferencesManager.getSavedUserEmail() } ?: preferencesManager.getSavedUserEmail()
+            val userName = user?.fullName?.ifBlank { preferencesManager.getSavedFullName() } ?: preferencesManager.getSavedFullName()
 
             val opportunity = Opportunity(
                 type = type,
@@ -204,34 +223,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 timestamp = System.currentTimeMillis()
             )
 
-            val (_, emailMsg) = repository.saveOpportunity(opportunity)
-            _notifications.emit(
-                UiNotification.Success(
-                    message = "Oportunidade guardada com sucesso e enviada para $personalEmail!",
-                    emailMessage = emailMsg
+            val (_, emailMsg, smtpResult) = repository.saveOpportunity(opportunity)
+
+            if (smtpResult is SmtpResult.Success) {
+                _notifications.emit(
+                    UiNotification.Success(
+                        message = "Oportunidade guardada e enviada via SMTP para $personalEmail!",
+                        details = smtpResult.details,
+                        emailMessage = emailMsg
+                    )
                 )
-            )
-            onComplete(emailMsg)
+            } else if (smtpResult is SmtpResult.Error) {
+                _notifications.emit(
+                    UiNotification.Error(
+                        message = "Oportunidade guardada localmente, mas falhou o envio SMTP: ${smtpResult.errorMessage}",
+                        details = smtpResult.details
+                    )
+                )
+            }
+
+            onComplete(opportunity, emailMsg, smtpResult)
         }
     }
 
-    fun registerAttendancePunch(onComplete: (Attendance, EmailMessage) -> Unit) {
+    fun registerAttendancePunch(onComplete: (Attendance, EmailMessage, SmtpResult) -> Unit) {
         viewModelScope.launch {
             val todayPunches = repository.getTodayPunchesSync()
             val user = currentUser.value
-            val collaboratorName = user?.fullName ?: preferencesManager.getSavedFullName()
+            val collaboratorName = user?.fullName?.ifBlank { preferencesManager.getSavedFullName() } ?: "Colaborador"
             val collaboratorId = user?.id ?: "usr_101"
 
-            val isFirstPunch = todayPunches.isEmpty() || todayPunches.size % 2 == 0
-            val type = if (isFirstPunch) "ENTRADA" else "SAIDA"
+            // Supports multiple punch pairs per day:
+            // 0 punches -> Entrada
+            // 1 punch -> Saida (linked to punch 0)
+            // 2 punches -> Entrada
+            // 3 punches -> Saida (linked to punch 2)
+            // 4 punches -> Entrada ...
+            val isFirstOfPair = (todayPunches.size % 2 == 0)
+            val type = if (isFirstOfPair) "ENTRADA" else "SAIDA"
 
-            val entryTimestamp = if (!isFirstPunch) {
+            val entryTimestamp = if (!isFirstOfPair) {
                 todayPunches.lastOrNull { it.type == "ENTRADA" }?.timestamp
             } else {
                 null
             }
 
-            val (punch, emailMsg) = repository.registerAttendance(
+            val (punch, emailMsg, smtpResult) = repository.registerAttendance(
                 type = type,
                 collaboratorName = collaboratorName,
                 collaboratorId = collaboratorId,
@@ -239,13 +276,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             val actionDesc = if (type == "ENTRADA") "Entrada registada" else "Saída registada"
-            _notifications.emit(
-                UiNotification.Success(
-                    message = "$actionDesc às ${punch.formattedTimestamp}! Email enviado para ${tableConfig.value.companyNotificationEmail}.",
-                    emailMessage = emailMsg
+            val targetEmail = tableConfig.value.companyNotificationEmail
+
+            if (smtpResult is SmtpResult.Success) {
+                _notifications.emit(
+                    UiNotification.Success(
+                        message = "$actionDesc às ${punch.formattedTimestamp}! Email enviado via SMTP para $targetEmail.",
+                        details = smtpResult.details,
+                        emailMessage = emailMsg
+                    )
                 )
-            )
-            onComplete(punch, emailMsg)
+            } else if (smtpResult is SmtpResult.Error) {
+                _notifications.emit(
+                    UiNotification.Error(
+                        message = "$actionDesc guardada, mas envio SMTP falhou: ${smtpResult.errorMessage}",
+                        details = smtpResult.details
+                    )
+                )
+            }
+
+            onComplete(punch, emailMsg, smtpResult)
         }
     }
 }

@@ -21,14 +21,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PunchClock
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -36,11 +36,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -56,45 +54,42 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.data.remote.EmailDispatcher
 import com.example.data.remote.EmailMessage
+import com.example.data.remote.SmtpResult
 import com.example.model.Attendance
 import com.example.ui.MainViewModel
 import com.example.ui.components.MapLocationCard
-import com.example.ui.theme.AlmaBlue
-import com.example.ui.theme.AlmaNavyDark
 import com.example.ui.theme.SuccessGreen
-import com.example.ui.theme.WarningAmber
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AttendanceScreen(
     viewModel: MainViewModel
 ) {
-    val context = LocalContext.current
     val currentLocation by viewModel.currentLocation.collectAsStateWithLifecycle()
     val isGpsRefreshing by viewModel.isGpsRefreshing.collectAsStateWithLifecycle()
     val todayAttendance by viewModel.todayAttendance.collectAsStateWithLifecycle()
     val allAttendance by viewModel.allAttendance.collectAsStateWithLifecycle()
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
     val tableConfig by viewModel.tableConfig.collectAsStateWithLifecycle()
+    val smtpConfig by viewModel.smtpConfig.collectAsStateWithLifecycle()
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     var isSubmitting by remember { mutableStateOf(false) }
-    var sentEmailMessage by remember { mutableStateOf<EmailMessage?>(null) }
-    var lastRecordedPunch by remember { mutableStateOf<Attendance?>(null) }
+
+    // Punch confirmation state (direct SMTP delivery feedback)
+    var punchResultDialog by remember { mutableStateOf<Triple<Attendance, EmailMessage, SmtpResult>?>(null) }
 
     // Live Clock Ticker
     var currentTimeMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -109,76 +104,104 @@ fun AttendanceScreen(
     val dateFormat = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
     val fullDateFormat = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault())
 
-    // Determine if next punch is ENTRADA (1st punch of the day) or SAIDA (2nd punch of the day)
-    val isFirstPunch = todayAttendance.isEmpty() || todayAttendance.size % 2 == 0
-    val nextPunchType = if (isFirstPunch) "ENTRADA" else "SAÍDA"
+    // Multiple punches per day logic:
+    // 0 punches -> ENTRADA
+    // 1 punch -> SAIDA (references punch 0)
+    // 2 punches -> ENTRADA
+    // 3 punches -> SAIDA (references punch 2)
+    // 4 punches -> ENTRADA...
+    val isEntryPunch = (todayAttendance.size % 2 == 0)
+    val nextPunchType = if (isEntryPunch) "ENTRADA" else "SAÍDA"
+    val punchPairNumber = (todayAttendance.size / 2) + 1
 
-    val currentEntryPunch = if (!isFirstPunch) todayAttendance.lastOrNull { it.type == "ENTRADA" } else null
+    val currentEntryPunch = if (!isEntryPunch) todayAttendance.lastOrNull { it.type == "ENTRADA" } else null
 
-    // Email Dispatch Result Dialog
-    sentEmailMessage?.let { emailMsg ->
+    // In-App SMTP Punch Feedback Dialog (No external app chooser!)
+    punchResultDialog?.let { (punch, emailMsg, smtpRes) ->
+        val isSmtpSuccess = smtpRes is SmtpResult.Success
+
         AlertDialog(
-            onDismissRequest = { sentEmailMessage = null },
+            onDismissRequest = { punchResultDialog = null },
             icon = {
                 Icon(
-                    imageVector = Icons.Default.CheckCircle,
+                    imageVector = if (isSmtpSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
                     contentDescription = null,
-                    tint = SuccessGreen,
-                    modifier = Modifier.size(36.dp)
+                    tint = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(40.dp)
                 )
             },
             title = {
                 Text(
-                    text = "Picagem de Assiduidade Registada!",
-                    fontWeight = FontWeight.Bold
+                    text = if (punch.type == "ENTRADA") "Entrada Registada!" else "Saída Registada!",
+                    fontWeight = FontWeight.Bold,
+                    color = if (punch.type == "ENTRADA") SuccessGreen else Color(0xFFE65100)
                 )
             },
             text = {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "A notificação com o nome do colaborador, coordenadas GPS, nome da rua e data/hora foi preparada para o Email da Empresa:",
+                        text = "A picagem de ponto foi registada na base de dados com as coordenadas GPS e enviada por SMTP diretamente para a empresa.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
                     Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Column(modifier = Modifier.padding(10.dp)) {
-                            Text(
-                                text = "Para: ${emailMsg.recipient}",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(text = "• Tipo: ${punch.type}", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text(text = "• Colaborador: ${punch.collaboratorName}", fontSize = 12.sp)
+                            Text(text = "• Data/Hora: ${punch.formattedTimestamp}", fontSize = 12.sp)
+                            Text(text = "• Local: ${punch.streetAddress}", fontSize = 12.sp)
+                            if (punch.formattedEntryTimestamp != null) {
+                                Text(text = "• Entrada Associada: ${punch.formattedEntryTimestamp}", fontSize = 12.sp, color = SuccessGreen)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // SMTP status banner
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isSmtpSuccess) SuccessGreen.copy(alpha = 0.15f) else MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Mail,
+                                contentDescription = null,
+                                tint = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = emailMsg.subject,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = if (isSmtpSuccess) "Email SMTP enviado para:" else "Aviso SMTP:",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    color = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    text = if (isSmtpSuccess) punch.companyEmail else (smtpRes as SmtpResult.Error).details,
+                                    fontSize = 11.sp,
+                                    color = if (isSmtpSuccess) SuccessGreen else MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
                         }
                     }
                 }
             },
             confirmButton = {
                 Button(
-                    onClick = {
-                        EmailDispatcher.dispatchEmailIntent(context, emailMsg)
-                        sentEmailMessage = null
-                    },
-                    modifier = Modifier.testTag("btn_send_attendance_email")
+                    onClick = { punchResultDialog = null },
+                    modifier = Modifier.testTag("btn_close_attendance_dialog")
                 ) {
-                    Icon(imageVector = Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Abrir Cliente de Email")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { sentEmailMessage = null }) {
-                    Text("Concluir")
+                    Text("OK, Concluir")
                 }
             }
         )
@@ -186,20 +209,20 @@ fun AttendanceScreen(
 
     Column(modifier = Modifier.fillMaxSize()) {
         // Tab Selector
-        TabRow(
+        SecondaryTabRow(
             selectedTabIndex = selectedTabIndex,
             containerColor = MaterialTheme.colorScheme.surface
         ) {
             Tab(
                 selected = selectedTabIndex == 0,
                 onClick = { selectedTabIndex = 0 },
-                text = { Text("Picagem de Ponto") },
+                text = { Text("Picagem de Ponto", fontWeight = FontWeight.Bold) },
                 icon = { Icon(Icons.Default.PunchClock, contentDescription = null, modifier = Modifier.size(18.dp)) }
             )
             Tab(
                 selected = selectedTabIndex == 1,
                 onClick = { selectedTabIndex = 1 },
-                text = { Text("Histórico (${allAttendance.size})") },
+                text = { Text("Histórico Geral (${allAttendance.size})", fontWeight = FontWeight.Bold) },
                 icon = { Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(18.dp)) }
             )
         }
@@ -266,7 +289,7 @@ fun AttendanceScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Colaborador: ${currentUser?.fullName ?: "Colaborador"}",
+                                text = "Colaborador: ${currentUser?.fullName?.ifBlank { currentUser?.userName } ?: "Utilizador"}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
@@ -275,8 +298,8 @@ fun AttendanceScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // Se for picagem de Saída mostra a data e hora de entrada (dd-mm-yyyy hh:ss)
-                        if (!isFirstPunch && currentEntryPunch != null) {
+                        // If Saida: show entry reference
+                        if (!isEntryPunch && currentEntryPunch != null) {
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
@@ -304,7 +327,7 @@ fun AttendanceScreen(
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column {
                                         Text(
-                                            text = "Entrada registada em:",
+                                            text = "Entrada do Período $punchPairNumber registada em:",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onPrimaryContainer
                                         )
@@ -325,15 +348,14 @@ fun AttendanceScreen(
                             Spacer(modifier = Modifier.height(16.dp))
                         }
 
-                        // Big Ergonomic Punch Button (Entrada se primeira picagem do dia ou Saída se segunda picagem)
-                        val buttonColor = if (isFirstPunch) SuccessGreen else Color(0xFFE65100)
+                        // Big Ergonomic Punch Button
+                        val buttonColor = if (isEntryPunch) SuccessGreen else Color(0xFFE65100)
                         Button(
                             onClick = {
                                 isSubmitting = true
-                                viewModel.registerAttendancePunch { punch, emailMsg ->
+                                viewModel.registerAttendancePunch { punch, emailMsg, smtpRes ->
                                     isSubmitting = false
-                                    lastRecordedPunch = punch
-                                    sentEmailMessage = emailMsg
+                                    punchResultDialog = Triple(punch, emailMsg, smtpRes)
                                 }
                             },
                             modifier = Modifier
@@ -342,9 +364,7 @@ fun AttendanceScreen(
                                 .testTag("btn_punch_attendance"),
                             shape = RoundedCornerShape(14.dp),
                             enabled = !isSubmitting,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = buttonColor
-                            )
+                            colors = ButtonDefaults.buttonColors(containerColor = buttonColor)
                         ) {
                             if (isSubmitting) {
                                 CircularProgressIndicator(
@@ -353,16 +373,16 @@ fun AttendanceScreen(
                                     color = Color.White
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
-                                Text("A registar e enviar notificação...")
+                                Text("A registar e enviar por SMTP...", fontWeight = FontWeight.Bold)
                             } else {
                                 Icon(
-                                    imageVector = if (isFirstPunch) Icons.Default.Login else Icons.Default.Logout,
+                                    imageVector = if (isEntryPunch) Icons.Default.Login else Icons.Default.Logout,
                                     contentDescription = null,
                                     modifier = Modifier.size(22.dp)
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Text(
-                                    text = if (isFirstPunch) "Registar ENTRADA" else "Registar SAÍDA",
+                                    text = if (isEntryPunch) "Registar ENTRADA (Período $punchPairNumber)" else "Registar SAÍDA (Período $punchPairNumber)",
                                     fontSize = 16.sp,
                                     fontWeight = FontWeight.ExtraBold
                                 )
@@ -372,7 +392,7 @@ fun AttendanceScreen(
                         Spacer(modifier = Modifier.height(12.dp))
 
                         Text(
-                            text = "A notificação será enviada para: ${tableConfig.companyNotificationEmail}",
+                            text = "Envio automático por SMTP para: ${tableConfig.companyNotificationEmail}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -380,7 +400,7 @@ fun AttendanceScreen(
                     }
                 }
 
-                // Today's punches timeline
+                // Today's punches timeline (supports unlimited pairs!)
                 if (todayAttendance.isNotEmpty()) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -388,14 +408,35 @@ fun AttendanceScreen(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "Picagens Registadas Hoje",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Picagens Registadas Hoje (${todayAttendance.size})",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer
+                                ) {
+                                    Text(
+                                        text = "${todayAttendance.size / 2} períodos completos",
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
 
-                            todayAttendance.forEach { punch ->
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            todayAttendance.forEachIndexed { idx, punch ->
+                                val periodNum = (idx / 2) + 1
+                                val isEntrada = punch.type == "ENTRADA"
+
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -408,17 +449,17 @@ fun AttendanceScreen(
                                             modifier = Modifier
                                                 .size(10.dp)
                                                 .background(
-                                                    if (punch.type == "ENTRADA") SuccessGreen else Color(0xFFE65100),
+                                                    if (isEntrada) SuccessGreen else Color(0xFFE65100),
                                                     CircleShape
                                                 )
                                         )
                                         Spacer(modifier = Modifier.width(10.dp))
                                         Column {
                                             Text(
-                                                text = punch.type,
+                                                text = "${punch.type} (Período $periodNum)",
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 fontWeight = FontWeight.Bold,
-                                                color = if (punch.type == "ENTRADA") SuccessGreen else Color(0xFFE65100)
+                                                color = if (isEntrada) SuccessGreen else Color(0xFFE65100)
                                             )
                                             Text(
                                                 text = punch.streetAddress,
@@ -429,7 +470,7 @@ fun AttendanceScreen(
                                     }
 
                                     Text(
-                                        text = punch.formattedTimestamp.split(" ").getOrNull(1) ?: "",
+                                        text = punch.formattedTimestamp.split(" ").getOrNull(1) ?: punch.formattedTimestamp,
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -525,38 +566,20 @@ fun AttendanceScreen(
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                        Icon(
-                                            imageVector = Icons.Default.LocationOn,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = item.streetAddress,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-
-                                    IconButton(
-                                        onClick = {
-                                            val msg = EmailDispatcher.generateAttendanceEmailContent(item)
-                                            EmailDispatcher.dispatchEmailIntent(context, msg)
-                                        },
-                                        modifier = Modifier.size(32.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Email,
-                                            contentDescription = "Reenviar Email",
-                                            tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.LocationOn,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = item.streetAddress,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
                                 }
                             }
                         }

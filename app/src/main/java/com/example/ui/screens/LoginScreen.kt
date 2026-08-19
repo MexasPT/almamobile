@@ -21,10 +21,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Error
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.Person
@@ -41,11 +39,9 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -64,16 +60,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
-import com.example.model.ServerConfig
 import com.example.ui.MainViewModel
 import com.example.ui.components.ServerConfigDialog
-import com.example.ui.theme.AlmaBlue
-import com.example.ui.theme.AlmaNavyDark
 
 @Composable
 fun LoginScreen(
@@ -82,25 +74,31 @@ fun LoginScreen(
 ) {
     val serverConfig by viewModel.serverConfig.collectAsStateWithLifecycle()
     val tableConfig by viewModel.tableConfig.collectAsStateWithLifecycle()
+    val smtpConfig by viewModel.smtpConfig.collectAsStateWithLifecycle()
     val isAuthenticating by viewModel.isAuthenticating.collectAsStateWithLifecycle()
     val loginError by viewModel.loginError.collectAsStateWithLifecycle()
 
     val coroutineScope = rememberCoroutineScope()
 
-    var username by remember { mutableStateOf("admin") }
-    var password by remember { mutableStateOf("admin") }
+    var username by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
     var showConfigDialog by remember { mutableStateOf(false) }
 
     if (showConfigDialog) {
         ServerConfigDialog(
             currentConfig = serverConfig,
+            currentTableConfig = tableConfig,
+            currentSmtpConfig = smtpConfig,
             onDismiss = { showConfigDialog = false },
-            onSave = { updated ->
-                viewModel.saveServerConfig(updated)
+            onSaveAll = { srv, tbl, smtp ->
+                viewModel.saveServerConfig(srv)
+                viewModel.saveTableConfig(tbl)
+                viewModel.saveSmtpConfig(smtp)
                 showConfigDialog = false
             },
             onTestConnection = { cfg -> viewModel.testConnection(cfg) },
+            onTestSmtp = { cfg, email -> viewModel.testSmtp(cfg, email) },
             coroutineScope = coroutineScope
         )
     }
@@ -154,7 +152,7 @@ fun LoginScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(230.dp)
+                    .height(220.dp)
                     .background(
                         Brush.verticalGradient(
                             colors = listOf(Color(0xFF2B2930), Color(0xFF1D1B20), Color(0xFF141218))
@@ -202,7 +200,7 @@ fun LoginScreen(
                                 letterSpacing = 0.5.sp
                             )
                             Text(
-                                text = "YetiForce CRM & Assiduidade GPS",
+                                text = "YetiForce CRM • Assiduidade GPS • SMTP",
                                 color = MaterialTheme.colorScheme.primary,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium
@@ -220,7 +218,7 @@ fun LoginScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
             ) {
-                // Connection Configuration Quick Bar
+                // Connection & Initial Setup Configuration Bar
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -257,19 +255,19 @@ fun LoginScreen(
                             Spacer(modifier = Modifier.width(10.dp))
                             Column {
                                 Text(
-                                    text = "Servidor YetiForce",
+                                    text = "Configuração Inicial",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "${serverConfig.ip}:${serverConfig.port} (${serverConfig.databaseName})",
+                                    text = "${serverConfig.ip}:${serverConfig.port} • ${tableConfig.userTable}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
 
-                        // Button to Configure Connection (As requested: "No inicio mostra um botão para configurar a ligação...")
+                        // Button to Configure Connection, Tables & SMTP
                         FilledTonalButton(
                             onClick = { showConfigDialog = true },
                             modifier = Modifier.testTag("btn_configure_connection"),
@@ -309,7 +307,7 @@ fun LoginScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Introduza as credenciais da tabela '${tableConfig.userTable}' para aceder.",
+                            text = "Introduza as credenciais da tabela '${tableConfig.userTable}' para aceder à conta CRM.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -324,7 +322,7 @@ fun LoginScreen(
                                 viewModel.clearLoginError()
                             },
                             label = { Text("Utilizador CRM *") },
-                            placeholder = { Text("admin ou comercial") },
+                            placeholder = { Text("Utilizador da base de dados") },
                             leadingIcon = {
                                 Icon(imageVector = Icons.Default.Person, contentDescription = null)
                             },
@@ -374,7 +372,7 @@ fun LoginScreen(
 
                         Spacer(modifier = Modifier.height(24.dp))
 
-                        // Login Button (As requested: "e um botão de login. O botão de login vai pedir o user e password e vai verificar na bd...")
+                        // Login Button
                         Button(
                             onClick = {
                                 viewModel.login(username, password, onLoginSuccess)
@@ -394,62 +392,11 @@ fun LoginScreen(
                                     color = Color.White
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
-                                Text("A verificar na Base de Dados...", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                                Text("A verificar credenciais...", fontSize = 15.sp, fontWeight = FontWeight.Bold)
                             } else {
                                 Icon(imageVector = Icons.Default.Login, contentDescription = null)
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Entrar na AlmaForce APP", fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Demo Credentials Quick Buttons
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp)
-                    ) {
-                        Text(
-                            text = "Preenchimento Rápido / Demonstração:",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    username = "admin"
-                                    password = "admin"
-                                },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text("Admin (admin/admin)", fontSize = 11.sp)
-                            }
-
-                            OutlinedButton(
-                                onClick = {
-                                    username = "rodolfo"
-                                    password = "almaforce"
-                                },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Text("Rodolfo (Comercial)", fontSize = 11.sp)
                             }
                         }
                     }
