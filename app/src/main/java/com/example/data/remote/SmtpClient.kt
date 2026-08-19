@@ -59,8 +59,10 @@ class SmtpClient {
         try {
             Log.d(TAG, "Connecting to SMTP $host:$portInt (Security: ${config.securityType})...")
 
+            val isDirectSsl = config.securityType.equals("SSL", ignoreCase = true) || portInt == 465
+
             // 1. Initial Socket Connection
-            if (config.securityType == "SSL") {
+            if (isDirectSsl) {
                 val sslFactory = SSLSocketFactory.getDefault() as SSLSocketFactory
                 val sslSocket = sslFactory.createSocket() as SSLSocket
                 sslSocket.connect(InetSocketAddress(host, portInt), TIMEOUT_MS)
@@ -94,8 +96,8 @@ class SmtpClient {
                 readSmtpResponse(reader)
             }
 
-            // STARTTLS if configured
-            if (config.securityType == "TLS") {
+            // STARTTLS if configured and not already SSL
+            if (!isDirectSsl && config.securityType.equals("TLS", ignoreCase = true)) {
                 writer.print("STARTTLS\r\n")
                 writer.flush()
                 val tlsResp = readSmtpResponse(reader)

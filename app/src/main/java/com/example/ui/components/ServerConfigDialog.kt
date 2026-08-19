@@ -112,7 +112,7 @@ fun ServerConfigDialog(
     var smtpUsername by remember { mutableStateOf(currentSmtpConfig.username) }
     var smtpPassword by remember { mutableStateOf(currentSmtpConfig.password) }
     var showSmtpPassword by remember { mutableStateOf(false) }
-    var smtpTestEmail by remember { mutableStateOf(currentSmtpConfig.senderEmail) }
+    var smtpTestEmail by remember { mutableStateOf("geral@iterp.pt") }
 
     var smtpTestStatus by remember { mutableStateOf<SmtpResult?>(null) }
     var isTestingSmtp by remember { mutableStateOf(false) }

@@ -123,7 +123,7 @@ fun SettingsScreen(
     var smtpUsername by remember(smtpConfig) { mutableStateOf(smtpConfig.username) }
     var smtpPassword by remember(smtpConfig) { mutableStateOf(smtpConfig.password) }
     var showSmtpPass by remember { mutableStateOf(false) }
-    var smtpTestRecipient by remember(smtpConfig) { mutableStateOf(smtpConfig.senderEmail) }
+    var smtpTestRecipient by remember(smtpConfig) { mutableStateOf("geral@iterp.pt") }
 
     var smtpTestStatus by remember { mutableStateOf<SmtpResult?>(null) }
     var isTestingSmtp by remember { mutableStateOf(false) }

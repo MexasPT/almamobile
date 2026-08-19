@@ -27,11 +27,11 @@ class PreferencesManager(context: Context) {
 
     fun loadServerConfig(): ServerConfig {
         return ServerConfig(
-            ip = prefs.getString(KEY_IP, "192.168.1.100") ?: "192.168.1.100",
-            port = prefs.getString(KEY_PORT, "80") ?: "80",
-            databaseName = prefs.getString(KEY_DB_NAME, "yetiforce") ?: "yetiforce",
-            dbUser = prefs.getString(KEY_DB_USER, "yetiforce_user") ?: "yetiforce_user",
-            dbPassword = prefs.getString(KEY_DB_PASS, "") ?: "",
+            ip = prefs.getString(KEY_IP, "94.126.169.16") ?: "94.126.169.16",
+            port = prefs.getString(KEY_PORT, "3306") ?: "3306",
+            databaseName = prefs.getString(KEY_DB_NAME, "almafor3_base") ?: "almafor3_base",
+            dbUser = prefs.getString(KEY_DB_USER, "almafor3_base") ?: "almafor3_base",
+            dbPassword = prefs.getString(KEY_DB_PASS, "8pO(()(S6EYQ3]") ?: "8pO(()(S6EYQ3]",
             useHttps = prefs.getBoolean(KEY_USE_HTTPS, false),
             apiKey = prefs.getString(KEY_API_KEY, "") ?: ""
         )
@@ -53,11 +53,11 @@ class PreferencesManager(context: Context) {
     fun loadTableConfig(): TableConfig {
         return TableConfig(
             userTable = prefs.getString(KEY_TBL_USER, "vtiger_users") ?: "vtiger_users",
-            userNameField = prefs.getString(KEY_FLD_USER_NAME, "first_name, last_name") ?: "first_name, last_name",
+            userNameField = prefs.getString(KEY_FLD_USER_NAME, "last_name, first_name") ?: "last_name, first_name",
             userEmailField = prefs.getString(KEY_FLD_USER_EMAIL, "email1") ?: "email1",
             clientTable = prefs.getString(KEY_TBL_CLIENT, "vtiger_account") ?: "vtiger_account",
             clientNameField = prefs.getString(KEY_FLD_CLIENT_NAME, "accountname") ?: "accountname",
-            companyNotificationEmail = prefs.getString(KEY_COMPANY_EMAIL, "rh@almaforce.pt") ?: "rh@almaforce.pt"
+            companyNotificationEmail = prefs.getString(KEY_COMPANY_EMAIL, "geral@iterp.pt") ?: "geral@iterp.pt"
         )
     }
 
@@ -75,14 +75,14 @@ class PreferencesManager(context: Context) {
 
     fun loadSmtpConfig(): SmtpConfig {
         return SmtpConfig(
-            senderName = prefs.getString(KEY_SMTP_SENDER_NAME, "AlmaForce CRM") ?: "AlmaForce CRM",
-            senderEmail = prefs.getString(KEY_SMTP_SENDER_EMAIL, "notificacoes@almaforce.pt") ?: "notificacoes@almaforce.pt",
-            host = prefs.getString(KEY_SMTP_HOST, "smtp.almaforce.pt") ?: "smtp.almaforce.pt",
-            port = prefs.getString(KEY_SMTP_PORT, "587") ?: "587",
+            senderName = prefs.getString(KEY_SMTP_SENDER_NAME, "AlmaForce") ?: "AlmaForce",
+            senderEmail = prefs.getString(KEY_SMTP_SENDER_EMAIL, "alma@almaforce.") ?: "alma@almaforce.",
+            host = prefs.getString(KEY_SMTP_HOST, "mail.almaforce.") ?: "mail.almaforce.",
+            port = prefs.getString(KEY_SMTP_PORT, "465") ?: "465",
             requireAuth = prefs.getBoolean(KEY_SMTP_REQ_AUTH, true),
             securityType = prefs.getString(KEY_SMTP_SECURITY, "TLS") ?: "TLS",
-            username = prefs.getString(KEY_SMTP_USER, "") ?: "",
-            password = prefs.getString(KEY_SMTP_PASS, "") ?: ""
+            username = prefs.getString(KEY_SMTP_USER, "alma@almaforce.") ?: "alma@almaforce.",
+            password = prefs.getString(KEY_SMTP_PASS, "ITerp$") ?: "ITerp$"
         )
     }
 
