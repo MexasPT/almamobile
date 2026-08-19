@@ -33,7 +33,9 @@ class PreferencesManager(context: Context) {
             dbUser = prefs.getString(KEY_DB_USER, "almafor3_base") ?: "almafor3_base",
             dbPassword = prefs.getString(KEY_DB_PASS, "8pO(()(S6EYQ3]") ?: "8pO(()(S6EYQ3]",
             useHttps = prefs.getBoolean(KEY_USE_HTTPS, false),
-            apiKey = prefs.getString(KEY_API_KEY, "") ?: ""
+            apiKey = prefs.getString(KEY_API_KEY, "XfRn1BEJM6sa4Wmpc3TxEdVqbhYvf07G") ?: "XfRn1BEJM6sa4Wmpc3TxEdVqbhYvf07G",
+            apiUser = prefs.getString(KEY_API_USER, "admin") ?: "admin",
+            apiPassword = prefs.getString(KEY_API_PASSWORD, "branco4admin") ?: "branco4admin"
         )
     }
 
@@ -46,6 +48,8 @@ class PreferencesManager(context: Context) {
             .putString(KEY_DB_PASS, config.dbPassword)
             .putBoolean(KEY_USE_HTTPS, config.useHttps)
             .putString(KEY_API_KEY, config.apiKey)
+            .putString(KEY_API_USER, config.apiUser)
+            .putString(KEY_API_PASSWORD, config.apiPassword)
             .apply()
         _serverConfigFlow.value = config
     }
@@ -123,6 +127,8 @@ class PreferencesManager(context: Context) {
         private const val KEY_DB_PASS = "pref_db_pass"
         private const val KEY_USE_HTTPS = "pref_use_https"
         private const val KEY_API_KEY = "pref_api_key"
+        private const val KEY_API_USER = "pref_api_user"
+        private const val KEY_API_PASSWORD = "pref_api_password"
 
         private const val KEY_TBL_USER = "pref_tbl_user"
         private const val KEY_FLD_USER_NAME = "pref_fld_user_name"

@@ -101,6 +101,9 @@ fun SettingsScreen(
     var dbPass by remember(serverConfig) { mutableStateOf(serverConfig.dbPassword) }
     var useHttps by remember(serverConfig) { mutableStateOf(serverConfig.useHttps) }
     var showPassword by remember { mutableStateOf(false) }
+    var apiUser by remember(serverConfig) { mutableStateOf(serverConfig.apiUser) }
+    var apiPassword by remember(serverConfig) { mutableStateOf(serverConfig.apiPassword) }
+    var apiKey by remember(serverConfig) { mutableStateOf(serverConfig.apiKey) }
 
     var testStatus by remember { mutableStateOf<ConnectionTestResult?>(null) }
     var isTestingServer by remember { mutableStateOf(false) }
@@ -341,6 +344,57 @@ fun SettingsScreen(
                                 )
                             }
 
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            // YetiForce Web Service API Section
+                            Text(
+                                text = "Web Service - Applications (API YetiForce)",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Credenciais da aplicação em YetiForce > Configurações > Integração > Web service - Applications",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            OutlinedTextField(
+                                value = apiUser,
+                                onValueChange = { apiUser = it },
+                                label = { Text("Utilizador da Aplicação API *") },
+                                placeholder = { Text("admin") },
+                                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().testTag("settings_input_apiuser")
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            OutlinedTextField(
+                                value = apiPassword,
+                                onValueChange = { apiPassword = it },
+                                label = { Text("Palavra-passe da Aplicação API *") },
+                                placeholder = { Text("branco4admin") },
+                                leadingIcon = { Icon(Icons.Default.Key, contentDescription = null) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().testTag("settings_input_apipass")
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            OutlinedTextField(
+                                value = apiKey,
+                                onValueChange = { apiKey = it },
+                                label = { Text("Chave da Aplicação (API Key / X-API-KEY) *") },
+                                placeholder = { Text("XfRn1BEJM6sa4Wmpc3TxEdVqbhYvf07G") },
+                                leadingIcon = { Icon(Icons.Default.Key, contentDescription = null) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().testTag("settings_input_apikey")
+                            )
+
                             Spacer(modifier = Modifier.height(18.dp))
 
                             // Test Connection Button
@@ -352,7 +406,10 @@ fun SettingsScreen(
                                         databaseName = dbName.trim(),
                                         dbUser = dbUser.trim(),
                                         dbPassword = dbPass,
-                                        useHttps = useHttps
+                                        useHttps = useHttps,
+                                        apiKey = apiKey.trim(),
+                                        apiUser = apiUser.trim(),
+                                        apiPassword = apiPassword
                                     )
                                     isTestingServer = true
                                     testStatus = null
@@ -412,7 +469,10 @@ fun SettingsScreen(
                                         databaseName = dbName.trim(),
                                         dbUser = dbUser.trim(),
                                         dbPassword = dbPass,
-                                        useHttps = useHttps
+                                        useHttps = useHttps,
+                                        apiKey = apiKey.trim(),
+                                        apiUser = apiUser.trim(),
+                                        apiPassword = apiPassword
                                     )
                                     viewModel.saveServerConfig(newConfig)
                                 },

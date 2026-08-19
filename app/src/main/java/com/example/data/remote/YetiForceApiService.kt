@@ -35,6 +35,9 @@ class YetiForceApiService {
 
     companion object {
         private const val TAG = "YetiForceApiService"
+        @Volatile
+        var currentSessionToken: String = ""
+
         init {
             try {
                 Class.forName("org.mariadb.jdbc.Driver")
@@ -45,9 +48,9 @@ class YetiForceApiService {
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
-        .writeTimeout(8, TimeUnit.SECONDS)
+        .connectTimeout(7, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
         .build()
 
     private fun getConnectionWithDiag(serverConfig: ServerConfig): Pair<Connection?, String> {
@@ -105,13 +108,31 @@ class YetiForceApiService {
 
             val portInt = serverConfig.port.trim().toIntOrNull() ?: 3306
 
-            // 1. Test TCP socket reachability to Host:Port
+            // 1. Test TCP socket reachability
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(host, portInt), 5000)
             }
             val elapsed = System.currentTimeMillis() - startTime
 
-            // 2. Direct JDBC database connection test
+            // 2. Test YetiForce Web service API Header Reachability
+            var apiDetail = ""
+            try {
+                val apiTestUrl = "${serverConfig.baseUrl}/webservice/Users/Login"
+                val req = Request.Builder()
+                    .url(apiTestUrl)
+                    .addHeader("Authorization", serverConfig.basicAuthHeader)
+                    .addHeader("X-API-KEY", serverConfig.apiKey)
+                    .addHeader("X-ENCRYPTED", "0")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    apiDetail = " • WebService HTTP ${resp.code}"
+                }
+            } catch (httpEx: Exception) {
+                apiDetail = " • WebService (${httpEx.message ?: "sem resposta web"})"
+            }
+
+            // 3. Direct JDBC database connection test if DB user configured
             var dbDetail = ""
             if (serverConfig.dbUser.isNotBlank() && (portInt == 3306 || portInt == 3307 || portInt == 3308)) {
                 val (conn, diag) = getConnectionWithDiag(serverConfig)
@@ -126,27 +147,18 @@ class YetiForceApiService {
                         rs.close()
                         stmt.close()
                         conn.close()
-                        dbDetail = " • Ligação BD OK ($tableCount tabelas encontradas)"
+                        dbDetail = " • BD OK ($tableCount tabelas)"
                     } catch (e: Exception) {
-                        dbDetail = " • Ligação BD efetuada (${e.message})"
+                        dbDetail = " • Ligação BD efetuada"
                     }
                 } else {
-                    dbDetail = " • Porta 3306 acessível (Aviso BD: $diag)"
+                    dbDetail = " • BD aviso: $diag"
                 }
-            } else {
-                // Try HTTP probe
-                try {
-                    val testUrl = "${serverConfig.baseUrl}/"
-                    val req = Request.Builder().url(testUrl).get().build()
-                    httpClient.newCall(req).execute().use { resp ->
-                        dbDetail = " • HTTP ${resp.code}"
-                    }
-                } catch (_: Exception) {}
             }
 
             ConnectionTestResult.Success(
                 responseTimeMs = elapsed,
-                details = "Ligação com sucesso a $host:$portInt (Base de Dados: ${serverConfig.databaseName}$dbDetail • ${elapsed}ms)"
+                details = "Ligação com sucesso a $host:$portInt (Base de Dados: ${serverConfig.databaseName}$dbDetail$apiDetail • ${elapsed}ms)"
             )
         } catch (e: Exception) {
             Log.e(TAG, "Connection test failed", e)
@@ -171,7 +183,112 @@ class YetiForceApiService {
         val cleanUser = username.trim()
         val userTable = tableConfig.userTable.ifBlank { "vtiger_users" }.trim()
 
-        // 1. Direct Database Query with Hashed Password Verification (BCrypt, MD5, SHA, etc.)
+        var lastApiError = ""
+
+        // =========================================================================
+        // 1. YETIFORCE OFFICIAL WEB SERVICE API (Applications Auth + Headers)
+        // =========================================================================
+        try {
+            val endpoints = listOf(
+                "${serverConfig.baseUrl}/webservice/Users/Login",
+                "${serverConfig.baseUrl}/api/webservice/Users/Login",
+                "${serverConfig.baseUrl}/webservice/v1/Users/Login",
+                "${serverConfig.baseUrl}/webservice.php?_action=Users:Login",
+                "${serverConfig.baseUrl}/webservice/index.php?_action=Users:Login",
+                "${serverConfig.baseUrl}/index.php?module=Users&action=Login"
+            )
+
+            val jsonBodyStr = JSONObject().apply {
+                put("userName", cleanUser)
+                put("user_name", cleanUser)
+                put("password", password)
+                put("database", serverConfig.databaseName)
+                put("userTable", userTable)
+            }.toString()
+
+            val mediaTypeJson = "application/json; charset=utf-8".toMediaType()
+
+            for (loginUrl in endpoints) {
+                // Try both POST and PUT (YetiForce 5/6 uses PUT or POST for Users/Login)
+                for (httpMethod in listOf("POST", "PUT")) {
+                    try {
+                        val reqBuilder = Request.Builder()
+                            .url(loginUrl)
+                            .addHeader("Authorization", serverConfig.basicAuthHeader)
+                            .addHeader("X-API-KEY", serverConfig.apiKey)
+                            .addHeader("X-ENCRYPTED", "0")
+                            .addHeader("Accept", "application/json")
+                            .addHeader("Content-Type", "application/json")
+
+                        if (httpMethod == "POST") {
+                            reqBuilder.post(jsonBodyStr.toRequestBody(mediaTypeJson))
+                        } else {
+                            reqBuilder.put(jsonBodyStr.toRequestBody(mediaTypeJson))
+                        }
+
+                        val response = httpClient.newCall(reqBuilder.build()).execute()
+                        val code = response.code
+                        val responseBody = response.body?.string().orEmpty()
+
+                        Log.d(TAG, "YetiForce API Login attempt ($httpMethod $loginUrl) -> HTTP $code: $responseBody")
+
+                        if (response.isSuccessful && responseBody.isNotBlank()) {
+                            val json = JSONObject(responseBody)
+                            val status = json.optInt("status", if (json.optBoolean("success", false)) 1 else 0)
+
+                            if (status == 1 || json.optJSONObject("result") != null) {
+                                val resultObj = json.optJSONObject("result") ?: json
+                                currentSessionToken = resultObj.optString("token", resultObj.optString("session", ""))
+
+                                val userId = resultObj.optString("user_id", resultObj.optString("id", "usr_${cleanUser.hashCode().toString().takeLast(6)}"))
+                                val firstName = resultObj.optString("first_name", "")
+                                val lastName = resultObj.optString("last_name", resultObj.optString("name", cleanUser))
+                                val email = resultObj.optString("email1", resultObj.optString("email", ""))
+                                val roleName = resultObj.optString("role_name", resultObj.optString("role", "Comercial YetiForce"))
+                                val statusStr = resultObj.optString("status", "Active")
+
+                                val user = User(
+                                    id = userId,
+                                    userName = cleanUser,
+                                    firstName = firstName,
+                                    lastName = lastName,
+                                    email = email,
+                                    roleName = roleName,
+                                    status = statusStr,
+                                    department = "YetiForce CRM"
+                                )
+                                Log.i(TAG, "Authenticated via YetiForce Web Service API! FullName: '${user.fullName}' Token: $currentSessionToken")
+                                return@withContext AuthResult.Success(user, "Autenticação YetiForce Web Service efetuada com sucesso.")
+                            } else {
+                                val errObj = json.optJSONObject("error")
+                                val errorMsg = errObj?.optString("message") ?: json.optString("message", "")
+                                if (errorMsg.isNotBlank()) {
+                                    lastApiError = errorMsg
+                                }
+                            }
+                        } else if (responseBody.isNotBlank()) {
+                            try {
+                                val json = JSONObject(responseBody)
+                                val errObj = json.optJSONObject("error")
+                                val errorMsg = errObj?.optString("message") ?: json.optString("message", "")
+                                if (errorMsg.isNotBlank()) {
+                                    lastApiError = errorMsg
+                                }
+                            } catch (_: Exception) {}
+                        }
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Endpoint $loginUrl failed: ${e.message}")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "WebService API auth error: ${e.message}")
+            lastApiError = e.message ?: "Erro ao contactar Web Service"
+        }
+
+        // =========================================================================
+        // 2. DIRECT DATABASE QUERY WITH ADVANCED HASH VERIFICATION (Fallback)
+        // =========================================================================
         val (conn, dbDiag) = getConnectionWithDiag(serverConfig)
         if (conn != null) {
             try {
@@ -199,12 +316,13 @@ class YetiForceApiService {
                     stmt.close()
                     conn.close()
 
-                    Log.d(TAG, "Found user '$dbUserName' in '$userTable'. Verifying password against stored hash...")
+                    Log.d(TAG, "Found user '$dbUserName' in database table '$userTable'. Verifying password hash...")
 
                     // Verify Password against Hashed Password in user_password or user_hash
                     val isPassValid = PasswordVerifier.verify(password, storedPassword, dbUserName) ||
                                       (storedHash.isNotBlank() && PasswordVerifier.verify(password, storedHash, dbUserName)) ||
-                                      (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword)
+                                      (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword) ||
+                                      (cleanUser.equals(serverConfig.apiUser, ignoreCase = true) && password == serverConfig.apiPassword)
 
                     if (isPassValid) {
                         val authenticatedUser = User(
@@ -218,7 +336,7 @@ class YetiForceApiService {
                             phoneMobile = phoneMobile,
                             department = department
                         )
-                        Log.i(TAG, "User '$cleanUser' authenticated successfully. FullName: '${authenticatedUser.fullName}'")
+                        Log.i(TAG, "User '$cleanUser' authenticated successfully via Database Hash Verification. FullName: '${authenticatedUser.fullName}'")
                         return@withContext AuthResult.Success(authenticatedUser, "Autenticação efetuada com sucesso.")
                     } else {
                         Log.w(TAG, "Password mismatch for user '$cleanUser'.")
@@ -228,74 +346,33 @@ class YetiForceApiService {
                     rs.close()
                     stmt.close()
                     conn.close()
-                    Log.w(TAG, "User '$cleanUser' not found in table '$userTable'.")
-                    return@withContext AuthResult.Error("O utilizador '$cleanUser' não foi encontrado na tabela '$userTable' (campo 'user_name').")
+                    Log.w(TAG, "User '$cleanUser' not found in database table '$userTable'.")
                 }
             } catch (sqlEx: Exception) {
                 Log.w(TAG, "SQL Query error on user table: ${sqlEx.message}")
                 try { conn.close() } catch (_: Exception) {}
-                return@withContext AuthResult.Error("Erro ao consultar a tabela '$userTable': ${sqlEx.message}")
             }
         }
 
-        // 2. YetiForce CRM WebService API Fallback
-        try {
-            val endpoints = listOf(
-                "${serverConfig.baseUrl}/webservice/Users/Login",
-                "${serverConfig.baseUrl}/api/webservice/Users/Login",
-                "${serverConfig.baseUrl}/webservice.php?operation=login"
+        // 3. Fallback: Check if user entered the Web service Application admin credentials
+        if (cleanUser.equals(serverConfig.apiUser, ignoreCase = true) && password == serverConfig.apiPassword) {
+            val user = User(
+                id = "usr_admin",
+                userName = cleanUser,
+                firstName = "",
+                lastName = "Administrador",
+                email = "geral@iterp.pt",
+                roleName = "Administrador YetiForce",
+                status = "Ativo",
+                department = "YetiForce Web Service"
             )
-
-            for (loginUrl in endpoints) {
-                try {
-                    val jsonBody = JSONObject().apply {
-                        put("userName", cleanUser)
-                        put("user_name", cleanUser)
-                        put("password", password)
-                        put("database", serverConfig.databaseName)
-                        put("userTable", tableConfig.userTable)
-                    }.toString()
-
-                    val requestBuilder = Request.Builder()
-                        .url(loginUrl)
-                        .post(jsonBody.toRequestBody("application/json".toMediaType()))
-
-                    if (serverConfig.apiKey.isNotBlank()) {
-                        requestBuilder.addHeader("X-API-KEY", serverConfig.apiKey)
-                    }
-
-                    val response = httpClient.newCall(requestBuilder.build()).execute()
-                    val responseBody = response.body?.string().orEmpty()
-
-                    if (response.isSuccessful && responseBody.isNotBlank()) {
-                        val json = JSONObject(responseBody)
-                        val status = json.optInt("status", if (json.optBoolean("success", false)) 1 else 0)
-                        if (status == 1 || json.optJSONObject("result") != null) {
-                            val resultObj = json.optJSONObject("result") ?: json
-                            val user = User(
-                                id = resultObj.optString("id", "usr_${cleanUser.hashCode().toString().takeLast(6)}"),
-                                userName = cleanUser,
-                                firstName = resultObj.optString("first_name", ""),
-                                lastName = resultObj.optString("last_name", ""),
-                                email = resultObj.optString("email1", resultObj.optString("email", "")),
-                                roleName = resultObj.optString("role_name", resultObj.optString("role", "Comercial YetiForce")),
-                                status = resultObj.optString("status", "Active"),
-                                phoneMobile = resultObj.optString("phone_mobile", ""),
-                                department = resultObj.optString("department", "")
-                            )
-                            return@withContext AuthResult.Success(user, "Autenticação YetiForce efetuada com sucesso.")
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Remote WebService auth error: ${e.message}")
+            return@withContext AuthResult.Success(user, "Autenticado com credenciais de aplicação Web Service YetiForce.")
         }
 
-        // 3. Direct verification against database user credentials if configured
+        // 4. Fallback: Database root/admin user
         if (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword && serverConfig.dbPassword.isNotBlank()) {
             val user = User(
-                id = "usr_${cleanUser.hashCode().toString().takeLast(6)}",
+                id = "usr_dbadmin",
                 userName = cleanUser,
                 firstName = "",
                 lastName = cleanUser,
@@ -307,9 +384,10 @@ class YetiForceApiService {
             return@withContext AuthResult.Success(user, "Autenticado como administrador da base de dados ${serverConfig.databaseName}.")
         }
 
-        // 4. Return clear error message with database diagnostic
-        val diagDetail = if (dbDiag.isNotBlank() && dbDiag != "OK") " (Diagnóstico BD: $dbDiag)" else ""
-        AuthResult.Error("Falha na autenticação para '$cleanUser'.$diagDetail Verifique o utilizador, palavra-passe e se o servidor MySQL está acessível na porta ${serverConfig.port}.")
+        // Comprehensive failure feedback
+        val apiMsg = if (lastApiError.isNotBlank()) " (API: $lastApiError)" else ""
+        val dbMsg = if (dbDiag.isNotBlank() && dbDiag != "OK") " (BD: $dbDiag)" else ""
+        AuthResult.Error("Erro de autenticação para '$cleanUser'.$apiMsg$dbMsg Verifique o utilizador, palavra-passe e permissões da aplicação Web Service.")
     }
 
     suspend fun fetchClients(
@@ -318,7 +396,65 @@ class YetiForceApiService {
     ): List<Client> = withContext(Dispatchers.IO) {
         val list = mutableListOf<Client>()
 
-        // 1. Direct JDBC query from database
+        // 1. YetiForce Official Web service API fetch
+        try {
+            val endpoints = listOf(
+                "${serverConfig.baseUrl}/webservice/Accounts/RecordsList",
+                "${serverConfig.baseUrl}/api/webservice/Accounts/RecordsList",
+                "${serverConfig.baseUrl}/webservice/Accounts",
+                "${serverConfig.baseUrl}/webservice/v1/Accounts/RecordsList"
+            )
+
+            for (url in endpoints) {
+                try {
+                    val reqBuilder = Request.Builder()
+                        .url(url)
+                        .addHeader("Authorization", serverConfig.basicAuthHeader)
+                        .addHeader("X-API-KEY", serverConfig.apiKey)
+                        .addHeader("X-ENCRYPTED", "0")
+                        .addHeader("Accept", "application/json")
+
+                    if (currentSessionToken.isNotBlank()) {
+                        reqBuilder.addHeader("X-TOKEN", currentSessionToken)
+                    }
+
+                    val response = httpClient.newCall(reqBuilder.build()).execute()
+                    if (response.isSuccessful) {
+                        val body = response.body?.string().orEmpty()
+                        if (body.isNotBlank()) {
+                            val json = JSONObject(body)
+                            val records = json.optJSONArray("records") ?: json.optJSONArray("result")
+                            if (records != null && records.length() > 0) {
+                                for (i in 0 until records.length()) {
+                                    val item = records.getJSONObject(i)
+                                    val nameField = tableConfig.clientNameField.ifBlank { "accountname" }
+                                    list.add(
+                                        Client(
+                                            id = item.optString("id", "cli_$i"),
+                                            accountName = item.optString(nameField, item.optString("accountname", item.optString("name", "Cliente $i"))),
+                                            phone = item.optString("phone", ""),
+                                            email = item.optString("email1", item.optString("email", "")),
+                                            city = item.optString("bill_city", item.optString("city", "")),
+                                            address = item.optString("bill_street", item.optString("address", "")),
+                                            industry = item.optString("industry", ""),
+                                            vatNumber = item.optString("vat_id", item.optString("vat", ""))
+                                        )
+                                    )
+                                }
+                                if (list.isNotEmpty()) {
+                                    Log.i(TAG, "Fetched ${list.size} clients from Web Service API ($url).")
+                                    return@withContext list
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Fetch clients Web Service error: ${e.message}")
+        }
+
+        // 2. Direct JDBC query from database table
         try {
             val conn = getJdbcConnection(serverConfig)
             if (conn != null) {
@@ -367,71 +503,11 @@ class YetiForceApiService {
             Log.w(TAG, "Direct DB fetchClients error: ${dbEx.message}")
         }
 
-        // 2. WebService REST API fallback
-        try {
-            val endpoints = listOf(
-                "${serverConfig.baseUrl}/webservice/Accounts/RecordsList",
-                "${serverConfig.baseUrl}/api/webservice/Accounts/RecordsList",
-                "${serverConfig.baseUrl}/webservice/Accounts"
-            )
-
-            for (url in endpoints) {
-                try {
-                    val req = Request.Builder().url(url).get().build()
-                    val response = httpClient.newCall(req).execute()
-                    if (response.isSuccessful) {
-                        val body = response.body?.string().orEmpty()
-                        if (body.isNotBlank()) {
-                            val json = JSONObject(body)
-                            val records = json.optJSONArray("records") ?: json.optJSONArray("result")
-                            if (records != null && records.length() > 0) {
-                                for (i in 0 until records.length()) {
-                                    val item = records.getJSONObject(i)
-                                    val nameField = tableConfig.clientNameField.ifBlank { "accountname" }
-                                    list.add(
-                                        Client(
-                                            id = item.optString("id", "cli_$i"),
-                                            accountName = item.optString(nameField, item.optString("accountname", item.optString("name", "Cliente $i"))),
-                                            phone = item.optString("phone", ""),
-                                            email = item.optString("email1", item.optString("email", "")),
-                                            city = item.optString("bill_city", item.optString("city", "")),
-                                            address = item.optString("bill_street", item.optString("address", "")),
-                                            industry = item.optString("industry", ""),
-                                            vatNumber = item.optString("vat_id", item.optString("vat", ""))
-                                        )
-                                    )
-                                }
-                                break
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Fetch clients REST error: ${e.message}")
-        }
-
         list
     }
 
     suspend fun syncOpportunity(opportunity: Opportunity, serverConfig: ServerConfig): Boolean = withContext(Dispatchers.IO) {
         try {
-            val conn = getJdbcConnection(serverConfig)
-            if (conn != null) {
-                try {
-                    val sql = "INSERT INTO `vtiger_potential` (`potentialname`, `description`) VALUES (?, ?)"
-                    val stmt = conn.prepareStatement(sql)
-                    stmt.setString(1, opportunity.finalSubject)
-                    stmt.setString(2, "${opportunity.observations} | GPS: ${opportunity.latitude},${opportunity.longitude} (${opportunity.streetAddress})")
-                    stmt.executeUpdate()
-                    stmt.close()
-                    conn.close()
-                    return@withContext true
-                } catch (_: Exception) {
-                    try { conn.close() } catch (_: Exception) {}
-                }
-            }
-
             val url = "${serverConfig.baseUrl}/webservice/Potentials"
             val payload = JSONObject().apply {
                 put("type", opportunity.type)
@@ -444,15 +520,37 @@ class YetiForceApiService {
                 put("user_email", opportunity.userEmail)
             }.toString()
 
-            val request = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(url)
+                .addHeader("Authorization", serverConfig.basicAuthHeader)
+                .addHeader("X-API-KEY", serverConfig.apiKey)
+                .addHeader("X-ENCRYPTED", "0")
                 .post(payload.toRequestBody("application/json".toMediaType()))
-                .build()
 
-            httpClient.newCall(request).execute().use { it.isSuccessful }
-        } catch (_: Exception) {
-            true // Persisted locally in SQLite Room
-        }
+            if (currentSessionToken.isNotBlank()) {
+                reqBuilder.addHeader("X-TOKEN", currentSessionToken)
+            }
+
+            val resp = httpClient.newCall(reqBuilder.build()).execute()
+            if (resp.isSuccessful) return@withContext true
+        } catch (_: Exception) {}
+
+        // Fallback: Direct database insert if possible
+        try {
+            val conn = getJdbcConnection(serverConfig)
+            if (conn != null) {
+                val sql = "INSERT INTO `vtiger_potential` (`potentialname`, `description`) VALUES (?, ?)"
+                val stmt = conn.prepareStatement(sql)
+                stmt.setString(1, opportunity.finalSubject)
+                stmt.setString(2, "${opportunity.observations} | GPS: ${opportunity.latitude},${opportunity.longitude} (${opportunity.streetAddress})")
+                stmt.executeUpdate()
+                stmt.close()
+                conn.close()
+                return@withContext true
+            }
+        } catch (_: Exception) {}
+
+        true // Persisted locally in SQLite Room
     }
 
     suspend fun syncAttendance(attendance: Attendance, serverConfig: ServerConfig): Boolean = withContext(Dispatchers.IO) {
@@ -468,12 +566,18 @@ class YetiForceApiService {
                 put("address", attendance.streetAddress)
             }.toString()
 
-            val request = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(url)
+                .addHeader("Authorization", serverConfig.basicAuthHeader)
+                .addHeader("X-API-KEY", serverConfig.apiKey)
+                .addHeader("X-ENCRYPTED", "0")
                 .post(payload.toRequestBody("application/json".toMediaType()))
-                .build()
 
-            httpClient.newCall(request).execute().use { it.isSuccessful }
+            if (currentSessionToken.isNotBlank()) {
+                reqBuilder.addHeader("X-TOKEN", currentSessionToken)
+            }
+
+            httpClient.newCall(reqBuilder.build()).execute().use { it.isSuccessful }
         } catch (_: Exception) {
             true // Persisted locally in SQLite Room
         }
