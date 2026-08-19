@@ -61,6 +61,14 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+  packaging {
+    resources {
+      excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      excludes += "META-INF/AL2.0"
+      excludes += "META-INF/LGPL2.1"
+      excludes += "META-INF/INDEX.LIST"
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -101,6 +109,8 @@ dependencies {
   implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
+  implementation(libs.mariadb.client)
+  implementation(libs.jbcrypt)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 

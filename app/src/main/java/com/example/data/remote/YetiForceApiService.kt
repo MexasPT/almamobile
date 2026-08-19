@@ -13,10 +13,12 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.sql.Connection
+import java.sql.DriverManager
+import java.sql.ResultSet
 import java.util.concurrent.TimeUnit
 
 sealed class AuthResult {
@@ -31,23 +33,53 @@ sealed class ConnectionTestResult {
 
 class YetiForceApiService {
 
+    companion object {
+        private const val TAG = "YetiForceApiService"
+        init {
+            try {
+                Class.forName("org.mariadb.jdbc.Driver")
+            } catch (e: Exception) {
+                Log.w(TAG, "MariaDB JDBC Driver registration: ${e.message}")
+            }
+        }
+    }
+
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
         .writeTimeout(8, TimeUnit.SECONDS)
         .build()
 
+    private fun getJdbcConnection(serverConfig: ServerConfig): Connection? {
+        return try {
+            val host = cleanHost(serverConfig.ip)
+            val port = serverConfig.port.trim().toIntOrNull() ?: 3306
+            val dbName = serverConfig.databaseName.trim()
+            val dbUser = serverConfig.dbUser.trim()
+            val dbPass = serverConfig.dbPassword
+
+            val jdbcUrl = "jdbc:mariadb://$host:$port/$dbName?connectTimeout=6000&socketTimeout=6000&autoReconnect=true"
+            DriverManager.getConnection(jdbcUrl, dbUser, dbPass)
+        } catch (e: Exception) {
+            Log.e(TAG, "JDBC Connection failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun cleanHost(raw: String): String {
+        var host = raw.trim()
+        if (host.startsWith("http://", ignoreCase = true)) {
+            host = host.substring(7)
+        } else if (host.startsWith("https://", ignoreCase = true)) {
+            host = host.substring(8)
+        }
+        return host.split("/")[0].split(":")[0].trim()
+    }
+
     suspend fun testConnection(serverConfig: ServerConfig): ConnectionTestResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {
-            var rawHost = serverConfig.ip.trim()
-            if (rawHost.startsWith("http://", ignoreCase = true)) {
-                rawHost = rawHost.substring(7)
-            } else if (rawHost.startsWith("https://", ignoreCase = true)) {
-                rawHost = rawHost.substring(8)
-            }
-            val host = rawHost.split("/")[0].split(":")[0].trim()
-
+            val host = cleanHost(serverConfig.ip)
             if (host.isBlank()) {
                 return@withContext ConnectionTestResult.Error(
                     errorMessage = "Endereço IP/Host em branco",
@@ -55,7 +87,7 @@ class YetiForceApiService {
                 )
             }
 
-            val portInt = serverConfig.port.trim().toIntOrNull() ?: if (serverConfig.useHttps) 443 else 80
+            val portInt = serverConfig.port.trim().toIntOrNull() ?: 3306
 
             // 1. Test TCP socket reachability to Host:Port
             Socket().use { socket ->
@@ -63,28 +95,49 @@ class YetiForceApiService {
             }
             val elapsed = System.currentTimeMillis() - startTime
 
-            // 2. Test HTTP/HTTPS reachability
-            val testUrl = "${serverConfig.baseUrl}/"
-            var httpDetail = "Socket TCP OK"
-            try {
-                val req = Request.Builder().url(testUrl).get().build()
-                httpClient.newCall(req).execute().use { resp ->
-                    httpDetail = "HTTP ${resp.code} (${resp.message})"
+            // 2. Try Direct JDBC database connection if DB User is set
+            var dbDetail = ""
+            if (serverConfig.dbUser.isNotBlank() && (portInt == 3306 || portInt == 3307 || portInt == 3308)) {
+                try {
+                    val conn = getJdbcConnection(serverConfig)
+                    if (conn != null) {
+                        val stmt = conn.createStatement()
+                        val rs = stmt.executeQuery("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '${serverConfig.databaseName.trim()}'")
+                        var tableCount = 0
+                        if (rs.next()) {
+                            tableCount = rs.getInt(1)
+                        }
+                        rs.close()
+                        stmt.close()
+                        conn.close()
+                        dbDetail = " • Ligação BD OK ($tableCount tabelas encontradas)"
+                    } else {
+                        dbDetail = " • Porta 3306 aberta (Autenticação BD a verificar)"
+                    }
+                } catch (dbEx: Exception) {
+                    dbDetail = " • Porta 3306 aberta (BD: ${dbEx.message})"
                 }
-            } catch (httpEx: Exception) {
-                httpDetail = "Porta $portInt aberta (HTTP: ${httpEx.localizedMessage ?: "sem resposta web"})"
+            } else {
+                // Try HTTP probe
+                try {
+                    val testUrl = "${serverConfig.baseUrl}/"
+                    val req = Request.Builder().url(testUrl).get().build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        dbDetail = " • HTTP ${resp.code}"
+                    }
+                } catch (_: Exception) {}
             }
 
             ConnectionTestResult.Success(
                 responseTimeMs = elapsed,
-                details = "Ligação com sucesso a $host:$portInt (Base de Dados: ${serverConfig.databaseName} • $httpDetail • ${elapsed}ms)"
+                details = "Ligação com sucesso a $host:$portInt (Base de Dados: ${serverConfig.databaseName}$dbDetail • ${elapsed}ms)"
             )
         } catch (e: Exception) {
-            Log.e("YetiForceApi", "Connection test failed", e)
+            Log.e(TAG, "Connection test failed", e)
             val msg = e.localizedMessage ?: "Tempo limite esgotado ou endereço inacessível."
             ConnectionTestResult.Error(
                 errorMessage = "Falha ao contactar o servidor ${serverConfig.ip}:${serverConfig.port}",
-                details = "Erro: $msg. Verifique se o IP, porta e serviço YetiForce estão acessíveis na rede."
+                details = "Erro: $msg. Verifique se o IP, porta e serviço estão acessíveis na rede."
             )
         }
     }
@@ -101,7 +154,82 @@ class YetiForceApiService {
 
         val cleanUser = username.trim()
 
-        // 1. Attempt authentication against YetiForce CRM WebService endpoint
+        // 1. Direct Database Query with Hashed Password Verification (BCrypt, MD5, SHA, etc.)
+        try {
+            val conn = getJdbcConnection(serverConfig)
+            if (conn != null) {
+                val userTable = tableConfig.userTable.ifBlank { "vtiger_users" }.trim()
+                val sql = "SELECT * FROM `$userTable` WHERE `user_name` = ? OR `email1` = ? OR `email` = ? LIMIT 1"
+                
+                try {
+                    val stmt = conn.prepareStatement(sql)
+                    stmt.setString(1, cleanUser)
+                    stmt.setString(2, cleanUser)
+                    stmt.setString(3, cleanUser)
+                    val rs = stmt.executeQuery()
+
+                    if (rs.next()) {
+                        val userId = getColumnString(rs, "id", "id").ifBlank { getColumnString(rs, "user_id", "1") }
+                        val dbUserName = getColumnString(rs, "user_name", cleanUser)
+                        val storedPassword = getColumnString(rs, "user_password", "")
+                        val storedHash = getColumnString(rs, "user_hash", "")
+                        val firstName = getColumnString(rs, "first_name", "")
+                        val lastName = getColumnString(rs, "last_name", "")
+                        val email = getColumnString(rs, "email1", "").ifBlank { getColumnString(rs, "email", "") }
+                        val status = getColumnString(rs, "status", "Active")
+                        val roleId = getColumnString(rs, "roleid", "").ifBlank { getColumnString(rs, "role_name", "Comercial") }
+                        val phoneMobile = getColumnString(rs, "phone_mobile", "")
+                        val department = getColumnString(rs, "department", "")
+
+                        rs.close()
+                        stmt.close()
+                        conn.close()
+
+                        // Verify Password against Hashed Password or Hash Column
+                        val isPassValid = PasswordVerifier.verify(password, storedPassword, dbUserName) ||
+                                          (storedHash.isNotBlank() && PasswordVerifier.verify(password, storedHash, dbUserName)) ||
+                                          (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword)
+
+                        if (isPassValid) {
+                            val displayName = when {
+                                firstName.isNotBlank() && lastName.isNotBlank() -> "$firstName $lastName"
+                                firstName.isNotBlank() -> firstName
+                                lastName.isNotBlank() -> lastName
+                                else -> dbUserName
+                            }
+
+                            val authenticatedUser = User(
+                                id = userId,
+                                userName = dbUserName,
+                                firstName = firstName.ifBlank { displayName },
+                                lastName = lastName,
+                                email = email,
+                                roleName = roleId,
+                                status = status,
+                                phoneMobile = phoneMobile,
+                                department = department
+                            )
+                            Log.i(TAG, "User '$cleanUser' authenticated successfully via database hash verification.")
+                            return@withContext AuthResult.Success(authenticatedUser, "Autenticação efetuada com sucesso.")
+                        } else {
+                            Log.w(TAG, "Password mismatch for user '$cleanUser'.")
+                            return@withContext AuthResult.Error("Palavra-passe incorreta para o utilizador '$cleanUser'.")
+                        }
+                    } else {
+                        rs.close()
+                        stmt.close()
+                    }
+                } catch (sqlEx: Exception) {
+                    Log.w(TAG, "SQL Query error on user table: ${sqlEx.message}")
+                } finally {
+                    try { conn.close() } catch (_: Exception) {}
+                }
+            }
+        } catch (dbEx: Exception) {
+            Log.w(TAG, "DB Auth attempt error: ${dbEx.message}")
+        }
+
+        // 2. YetiForce CRM WebService API Fallback
         try {
             val endpoints = listOf(
                 "${serverConfig.baseUrl}/webservice/Users/Login",
@@ -138,7 +266,7 @@ class YetiForceApiService {
                             val user = User(
                                 id = resultObj.optString("id", "usr_${cleanUser.hashCode().toString().takeLast(6)}"),
                                 userName = cleanUser,
-                                firstName = resultObj.optString("first_name", cleanUser.capitalizeWords()),
+                                firstName = resultObj.optString("first_name", cleanUser),
                                 lastName = resultObj.optString("last_name", ""),
                                 email = resultObj.optString("email1", resultObj.optString("email", "")),
                                 roleName = resultObj.optString("role_name", resultObj.optString("role", "Comercial YetiForce")),
@@ -147,35 +275,30 @@ class YetiForceApiService {
                                 department = resultObj.optString("department", "")
                             )
                             return@withContext AuthResult.Success(user, "Autenticação YetiForce efetuada com sucesso.")
-                        } else {
-                            val errorMsg = json.optString("error", json.optString("message", "Credenciais rejeitadas pelo CRM."))
-                            return@withContext AuthResult.Error("Erro YetiForce: $errorMsg")
                         }
                     }
-                } catch (_: Exception) {
-                    // Try next endpoint
-                }
+                } catch (_: Exception) {}
             }
         } catch (e: Exception) {
-            Log.w("YetiForceApi", "Remote auth error: ${e.message}")
+            Log.w(TAG, "Remote WebService auth error: ${e.message}")
         }
 
-        // 2. Direct verification against database user credentials if configured
+        // 3. Direct verification against database user credentials
         if (cleanUser.equals(serverConfig.dbUser, ignoreCase = true) && password == serverConfig.dbPassword && serverConfig.dbPassword.isNotBlank()) {
             val user = User(
                 id = "usr_${cleanUser.hashCode().toString().takeLast(6)}",
                 userName = cleanUser,
-                firstName = cleanUser.capitalizeWords(),
+                firstName = cleanUser,
                 lastName = "",
                 email = "",
                 roleName = "Administrador Base de Dados",
                 status = "Ativo (${tableConfig.userTable})",
                 department = "YetiForce CRM"
             )
-            return@withContext AuthResult.Success(user, "Autenticado na base de dados ${serverConfig.databaseName}.")
+            return@withContext AuthResult.Success(user, "Autenticado como administrador da base de dados ${serverConfig.databaseName}.")
         }
 
-        // If credentials could not be verified on YetiForce or DB, strictly reject!
+        // If credentials could not be verified
         AuthResult.Error("Credenciais inválidas: utilizador '$cleanUser' ou palavra-passe incorretos na tabela '${tableConfig.userTable}' do servidor YetiForce.")
     }
 
@@ -184,6 +307,57 @@ class YetiForceApiService {
         tableConfig: TableConfig
     ): List<Client> = withContext(Dispatchers.IO) {
         val list = mutableListOf<Client>()
+
+        // 1. Direct JDBC query from database
+        try {
+            val conn = getJdbcConnection(serverConfig)
+            if (conn != null) {
+                val clientTable = tableConfig.clientTable.ifBlank { "vtiger_account" }.trim()
+                val sql = "SELECT * FROM `$clientTable` LIMIT 200"
+                val stmt = conn.createStatement()
+                val rs = stmt.executeQuery(sql)
+
+                var count = 0
+                while (rs.next()) {
+                    count++
+                    val id = getColumnString(rs, "accountid", "").ifBlank { getColumnString(rs, "id", "cli_$count") }
+                    val name = getColumnString(rs, tableConfig.clientNameField.ifBlank { "accountname" }, "")
+                        .ifBlank { getColumnString(rs, "accountname", "") }
+                        .ifBlank { getColumnString(rs, "name", "Cliente $count") }
+                    val phone = getColumnString(rs, "phone", "").ifBlank { getColumnString(rs, "otherphone", "") }
+                    val email = getColumnString(rs, "email1", "").ifBlank { getColumnString(rs, "email", "") }
+                    val city = getColumnString(rs, "bill_city", "").ifBlank { getColumnString(rs, "city", "") }
+                    val address = getColumnString(rs, "bill_street", "").ifBlank { getColumnString(rs, "address", "") }
+                    val industry = getColumnString(rs, "industry", "")
+                    val vat = getColumnString(rs, "vat_id", "").ifBlank { getColumnString(rs, "vat", "") }
+
+                    list.add(
+                        Client(
+                            id = id,
+                            accountName = name,
+                            phone = phone,
+                            email = email,
+                            city = city,
+                            address = address,
+                            industry = industry,
+                            vatNumber = vat
+                        )
+                    )
+                }
+                rs.close()
+                stmt.close()
+                conn.close()
+
+                if (list.isNotEmpty()) {
+                    Log.i(TAG, "Fetched ${list.size} real clients directly from database table `$clientTable`.")
+                    return@withContext list
+                }
+            }
+        } catch (dbEx: Exception) {
+            Log.w(TAG, "Direct DB fetchClients error: ${dbEx.message}")
+        }
+
+        // 2. WebService REST API fallback
         try {
             val endpoints = listOf(
                 "${serverConfig.baseUrl}/webservice/Accounts/RecordsList",
@@ -224,15 +398,30 @@ class YetiForceApiService {
                 } catch (_: Exception) {}
             }
         } catch (e: Exception) {
-            Log.w("YetiForceApi", "Fetch clients error: ${e.message}")
+            Log.w(TAG, "Fetch clients REST error: ${e.message}")
         }
 
-        // Return strictly real clients (no fake seeds!)
         list
     }
 
     suspend fun syncOpportunity(opportunity: Opportunity, serverConfig: ServerConfig): Boolean = withContext(Dispatchers.IO) {
         try {
+            val conn = getJdbcConnection(serverConfig)
+            if (conn != null) {
+                try {
+                    val sql = "INSERT INTO `vtiger_potential` (`potentialname`, `description`) VALUES (?, ?)"
+                    val stmt = conn.prepareStatement(sql)
+                    stmt.setString(1, opportunity.finalSubject)
+                    stmt.setString(2, "${opportunity.observations} | GPS: ${opportunity.latitude},${opportunity.longitude} (${opportunity.streetAddress})")
+                    stmt.executeUpdate()
+                    stmt.close()
+                    conn.close()
+                    return@withContext true
+                } catch (_: Exception) {
+                    try { conn.close() } catch (_: Exception) {}
+                }
+            }
+
             val url = "${serverConfig.baseUrl}/webservice/Potentials"
             val payload = JSONObject().apply {
                 put("type", opportunity.type)
@@ -252,7 +441,7 @@ class YetiForceApiService {
 
             httpClient.newCall(request).execute().use { it.isSuccessful }
         } catch (_: Exception) {
-            true // Saved in local SQLite Room
+            true // Persisted locally in SQLite Room
         }
     }
 
@@ -260,14 +449,13 @@ class YetiForceApiService {
         try {
             val url = "${serverConfig.baseUrl}/webservice/OSSTimeControl"
             val payload = JSONObject().apply {
-                put("type", attendance.type)
-                put("collaborator", attendance.collaboratorName)
+                put("user_id", attendance.collaboratorId)
+                put("user_name", attendance.collaboratorName)
+                put("punch_type", attendance.type)
                 put("timestamp", attendance.timestamp)
-                put("entry_timestamp", attendance.entryTimestamp)
                 put("gps_lat", attendance.latitude)
                 put("gps_lng", attendance.longitude)
-                put("gps_address", attendance.streetAddress)
-                put("company_email", attendance.companyEmail)
+                put("address", attendance.streetAddress)
             }.toString()
 
             val request = Request.Builder()
@@ -277,13 +465,15 @@ class YetiForceApiService {
 
             httpClient.newCall(request).execute().use { it.isSuccessful }
         } catch (_: Exception) {
-            true // Saved in local SQLite Room
+            true // Persisted locally in SQLite Room
         }
     }
 
-    private fun String.capitalizeWords(): String {
-        return split(" ").joinToString(" ") { word ->
-            word.lowercase().replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    private fun getColumnString(rs: ResultSet, columnName: String, fallback: String): String {
+        return try {
+            rs.getString(columnName)?.trim() ?: fallback
+        } catch (_: Exception) {
+            fallback
         }
     }
 }
