@@ -1,0 +1,7 @@
+{
+  "name": "AlmaForce APP",
+  "description": "Aplicação móvel de integração YetiForce CRM para gestão de oportunidades comerciais, registo de assiduidade com GPS e sincronização em tempo real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
